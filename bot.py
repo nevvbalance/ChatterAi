@@ -20,11 +20,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-async def health(request: web.Request) -> web.Response:
-    return web.Response(text="ChatterAi is alive! 🤖")
-
-
-async def create_app() -> web.Application:
+def create_app() -> web.Application:
     token = os.environ["BOT_TOKEN"]
     public_url = os.environ["RENDER_EXTERNAL_URL"].rstrip("/")
 
@@ -51,6 +47,9 @@ async def create_app() -> web.Application:
         await telegram_app.stop()
         await telegram_app.shutdown()
 
+    async def health(request: web.Request) -> web.Response:
+        return web.Response(text="ChatterAi is alive! 🤖")
+
     async def telegram_webhook(request: web.Request) -> web.Response:
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != webhook_secret:
             return web.Response(status=403, text="Forbidden")
@@ -71,5 +70,4 @@ async def create_app() -> web.Application:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
-    application = create_app()
-    web.run_app(application, host="0.0.0.0", port=port)
+    web.run_app(create_app(), host="0.0.0.0", port=port)
