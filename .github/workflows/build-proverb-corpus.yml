@@ -1,0 +1,36 @@
+name: Build proverb corpus
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 1 * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build corpus
+        run: python data/build_dal_corpus.py
+
+      - name: Commit updated corpus
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/dal_corpus.json
+          if git diff --cached --quiet; then
+            echo "No corpus changes"
+          else
+            git commit -m "Update Dal proverb corpus"
+            git push
+          fi
