@@ -11,9 +11,9 @@ from data.proverb_loader import search_proverbs
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Привет! 🤖 Я ChatterAi.\n\n"
-        "Я умею искать подходящие русские пословицы по смыслу.\n"
-        "Просто напиши ситуацию или вопрос.\n\n"
-        "Например: «Стоит ли спешить с важным решением?»"
+        "Я ищу подходящие русские пословицы и использую их смысл, чтобы ответить на твою ситуацию.\n\n"
+        "Напиши вопрос обычным сообщением.\n"
+        "Например: «Я постоянно откладываю важные дела»."
     )
 
 
@@ -21,8 +21,28 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "/start — запустить бота\n"
         "/help — показать помощь\n\n"
-        "Или просто напиши свой вопрос обычным сообщением."
+        "Просто напиши ситуацию или вопрос, и я подберу подходящую народную мудрость."
     )
+
+
+def build_answer(query: str, matches: list[dict]) -> str:
+    """Build a useful response from the retrieved proverb evidence without inventing facts."""
+    first = matches[0]
+    proverb = first.get("proverb", "")
+    meaning = first.get("meaning", "").strip()
+
+    if meaning:
+        answer = f"Мне кажется, здесь особенно подходит:\n\n🪶 «{proverb}»\n\n{meaning}"
+    else:
+        answer = f"Здесь хорошо подходит народная мудрость:\n\n🪶 «{proverb}»"
+
+    if len(matches) > 1:
+        answer += "\n\nЕщё в ту же сторону:\n"
+        for item in matches[1:3]:
+            answer += f"• «{item.get('proverb', '')}»\n"
+
+    answer += "\n\nЯ не выдаю пословицу за универсальный рецепт, но она может помочь взглянуть на ситуацию с другой стороны."
+    return answer
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -30,23 +50,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     query = update.message.text.strip()
+    if len(query) < 3:
+        await update.message.reply_text("Опиши ситуацию чуть подробнее 🙂")
+        return
+
     matches = search_proverbs(query, limit=3)
 
     if not matches:
         await update.message.reply_text(
-            "Пока не нашёл подходящей пословицы в своей базе. 🧐\n"
-            "Попробуй описать ситуацию немного подробнее."
+            "Пока не нашёл достаточно близкой пословицы в своей базе. 🧐\n\n"
+            "Попробуй описать ситуацию другими словами или чуть подробнее."
         )
         return
 
-    lines = ["Вот что нашлось в народной мудрости:\n"]
-    for item in matches:
-        lines.append(f"🪶 «{item['proverb']}»")
-        if item.get("meaning"):
-            lines.append(f"   {item['meaning']}")
-        lines.append("")
-
-    await update.message.reply_text("\n".join(lines).strip())
+    await update.message.reply_text(build_answer(query, matches))
 
 
 def create_app() -> web.Application:
