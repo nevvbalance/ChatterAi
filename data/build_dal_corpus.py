@@ -1,4 +1,4 @@
-"""Build a large Russian proverb corpus from public-domain Dal editions."""
+"""Build a Russian proverb corpus from Wikisource's Dal collection."""
 import json
 import re
 import time
@@ -8,28 +8,29 @@ from urllib.request import Request, urlopen
 
 API = "https://ru.wikisource.org/w/api.php"
 OUT = Path(__file__).resolve().parent / "dal_corpus.json"
-# Start with the verified 1862 namespace. More editions can be added after
-# their exact Wikisource page prefixes are verified.
-PREFIXES = [
-    ("1862", "Пословицы русского народа (Даль)/Изд. 1862 (ДО)/", "В. И. Даль, «Пословицы русского народа», 1862"),
-]
+PREFIX = "Пословицы русского народа (Даль)/Изд. 1862 (ДО)/"
+SOURCE = "В. И. Даль, «Пословицы русского народа», 1862"
+SOURCE_URL = "https://ru.wikisource.org/wiki/Пословицы_русского_народа_(Даль)/Изд._1862_(ДО)"
 
 
 def api(params):
     params = {**params, "format": "json", "formatversion": "2"}
     url = API + "?" + urlencode(params)
-    req = Request(url, headers={"User-Agent": "ChatterAi/1.0 proverb corpus builder"})
-    with urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode("utf-8"))
+    req = Request(url, headers={"User-Agent": "ChatterAi corpus builder/1.0"})
+    with urlopen(req, timeout=45) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if "error" in data:
+        raise RuntimeError(data["error"])
+    return data
 
 
 def normalize(text):
-    table = str.maketrans({"ѣ": "е", "Ѣ": "Е", "і": "и", "І": "И", "ѳ": "ф", "Ѳ": "Ф", "ѵ": "и", "Ѵ": "И"})
-    text = text.translate(table).replace("ъ", "").replace("Ъ", "")
+    text = text.translate(str.maketrans({"ѣ":"е","Ѣ":"Е","і":"и","І":"И","ѳ":"ф","Ѳ":"Ф","ѵ":"и","Ѵ":"И"}))
+    text = text.replace("ъ", "").replace("Ъ", "")
     return re.sub(r"\s+", " ", text).strip(" \t-*•;,: ")
 
 
-def clean_wikitext(raw):
+def clean(raw):
     raw = re.sub(r"<ref[^>]*>.*?</ref>", " ", raw, flags=re.S)
     raw = re.sub(r"\{\{.*?\}\}", " ", raw, flags=re.S)
     raw = re.sub(r"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]", r"\1", raw)
@@ -37,44 +38,51 @@ def clean_wikitext(raw):
     return raw
 
 
-def is_candidate(line):
+def candidate(line):
     line = normalize(line)
-    if not line or len(line) < 8 or len(line) > 350 or len(line.split()) > 35:
-        return False
-    bad = ("Страница:", "Источник", "Примечан", "Опубл", "автор", "Содержание", "Image", "ISBN", "Google", "Викитека", "Назад", "Вперед", "←", "→")
-    return not line.startswith(bad) and not line.startswith(("{{", "[[", "==", "#", "<", "|"))
+    if not (8 <= len(line) <= 350) or len(line.split()) > 35:
+        return None
+    bad = ("Страница:", "Источник", "Примечан", "Содержание", "Викитека", "ISBN", "Google", "Image", "←", "→")
+    if line.startswith(bad) or line.startswith(("{{", "[[", "==", "#", "<", "|")):
+        return None
+    return line if re.search(r"[А-Яа-яЁё]", line) else None
 
 
-def get_pages(prefix):
-    pages = []
-    cont = {}
+def get_pages():
+    pages, cont = [], {}
     while True:
-        data = api({"action": "query", "list": "allpages", "apprefix": prefix, "aplimit": "max", **cont})
-        if "query" not in data:
-            raise RuntimeError(f"Wikisource API error: {data.get('error', data)}")
-        pages.extend(p["title"] for p in data["query"]["allpages"])
-        if "continue" not in data:
-            return pages
+        data = api({"action":"query", "list":"allpages", "apprefix":PREFIX, "aplimit":"max", **cont})
+        batch = data.get("query", {}).get("allpages", [])
+        pages.extend(p["title"] for p in batch)
+        if not data.get("continue"):
+            break
         cont = data["continue"]
+    return pages
 
 
-def collect(source_id, prefix, source_name, records, seen):
-    pages = get_pages(prefix)
-    print(f"{source_id}: {len(pages)} pages")
-    for index, title in enumerate(pages, 1):
-        data = api({"action": "parse", "page": title, "prop": "wikitext"})
-        parsed = data.get("parse", {})
-        raw = parsed.get("wikitext", "")
-        # formatversion=2 returns wikitext as a string. Older responses may
-        # return an object with a '*' field, so support both forms.
-        if isinstance(raw, dict):
-            raw = raw.get("*", "")
-        for line in clean_wikitext(raw).splitlines():
-            line = normalize(line)
-            if not is_candidate(line):
+def get_text(title):
+    data = api({"action":"parse", "page":title, "prop":"wikitext"})
+    raw = data.get("parse", {}).get("wikitext", "")
+    return raw if isinstance(raw, str) else raw.get("*", "")
+
+
+def main():
+    pages = get_pages()
+    if not pages:
+        raise RuntimeError("Wikisource returned zero pages for the configured Dal prefix")
+    records, seen = [], set()
+    processed = 0
+    duplicates = 0
+    for title in pages:
+        raw = get_text(title)
+        processed += 1
+        for raw_line in clean(raw).splitlines():
+            line = candidate(raw_line)
+            if not line:
                 continue
             key = re.sub(r"[^а-яёa-z0-9]+", " ", line.casefold()).strip()
             if key in seen:
+                duplicates += 1
                 continue
             seen.add(key)
             records.append({
@@ -86,28 +94,21 @@ def collect(source_id, prefix, source_name, records, seen):
                 "situations": [],
                 "keywords": [],
                 "variants": [],
-                "source": source_name,
-                "source_url": "https://ru.wikisource.org/wiki/Пословицы_русского_народа_(Даль)",
+                "source": SOURCE,
+                "source_url": SOURCE_URL,
                 "source_page": title,
-                "source_id": source_id,
             })
-        if index % 50 == 0:
-            print(f"{source_id}: processed {index}/{len(pages)}; records={len(records)}")
+        if processed % 25 == 0:
+            print(f"pages={processed}/{len(pages)}, unique_records={len(records)}, duplicates={duplicates}")
         time.sleep(0.05)
-
-
-def main():
-    records, seen = [], set()
-    for source_id, prefix, source_name in PREFIXES:
-        collect(source_id, prefix, source_name, records, seen)
+    if not records:
+        raise RuntimeError(f"Corpus build found 0 records after processing {processed} pages")
     OUT.write_text(json.dumps({
-        "dataset": "ChatterAi Dal corpus",
-        "version": 3,
-        "count": len(records),
-        "sources": [name for _, _, name in PREFIXES],
-        "proverbs": records,
+        "dataset":"ChatterAi Dal corpus", "version":4,
+        "count":len(records), "pages_processed":processed,
+        "duplicates_removed":duplicates, "proverbs":records
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"wrote {OUT}: {len(records)} unique records")
+    print(f"SUCCESS: pages={processed}; unique_records={len(records)}; duplicates={duplicates}")
 
 
 if __name__ == "__main__":
