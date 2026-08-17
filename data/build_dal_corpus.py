@@ -1,4 +1,4 @@
-"""Build a Russian proverb corpus from Wikisource's Dal collection."""
+"""Build a large Russian proverb corpus from Dal pages on Wikisource."""
 import json
 import re
 import time
@@ -8,9 +8,9 @@ from urllib.request import Request, urlopen
 
 API = "https://ru.wikisource.org/w/api.php"
 OUT = Path(__file__).resolve().parent / "dal_corpus.json"
-PREFIX = "Пословицы русского народа (Даль)/Изд. 1862 (ДО)/"
-SOURCE = "В. И. Даль, «Пословицы русского народа», 1862"
-SOURCE_URL = "https://ru.wikisource.org/wiki/Пословицы_русского_народа_(Даль)/Изд._1862_(ДО)"
+CATEGORY = "Категория:Пословицы русского народа (Даль)"
+SOURCE = "В. И. Даль, «Пословицы русского народа», 1862 / Wikisource"
+SOURCE_URL = "https://ru.wikisource.org/wiki/Категория:Пословицы_русского_народа_(Даль)"
 
 
 def api(params):
@@ -48,16 +48,24 @@ def candidate(line):
     return line if re.search(r"[А-Яа-яЁё]", line) else None
 
 
-def get_pages():
+def get_category_members():
     pages, cont = [], {}
     while True:
-        data = api({"action":"query", "list":"allpages", "apprefix":PREFIX, "aplimit":"max", **cont})
-        batch = data.get("query", {}).get("allpages", [])
-        pages.extend(p["title"] for p in batch)
+        data = api({"action":"query", "list":"categorymembers", "cmtitle":CATEGORY, "cmnamespace":"0", "cmlimit":"max", **cont})
+        pages.extend(p["title"] for p in data.get("query", {}).get("categorymembers", []))
         if not data.get("continue"):
-            break
+            return pages
         cont = data["continue"]
-    return pages
+
+
+def get_subcategory_members(category):
+    pages, cont = [], {}
+    while True:
+        data = api({"action":"query", "list":"categorymembers", "cmtitle":category, "cmnamespace":"0", "cmlimit":"max", **cont})
+        pages.extend(p["title"] for p in data.get("query", {}).get("categorymembers", []))
+        if not data.get("continue"):
+            return pages
+        cont = data["continue"]
 
 
 def get_text(title):
@@ -67,15 +75,22 @@ def get_text(title):
 
 
 def main():
-    pages = get_pages()
+    pages = get_category_members()
+    # The main category contains the broad Dal collection, while the ДО
+    # category is a useful additional source. Add its members explicitly.
+    do_pages = get_subcategory_members("Категория:Пословицы русского народа (Даль)/ДО")
+    pages = list(dict.fromkeys(pages + do_pages))
     if not pages:
-        raise RuntimeError("Wikisource returned zero pages for the configured Dal prefix")
+        raise RuntimeError("Wikisource returned zero Dal pages")
+
     records, seen = [], set()
-    processed = 0
     duplicates = 0
-    for title in pages:
-        raw = get_text(title)
-        processed += 1
+    for i, title in enumerate(pages, 1):
+        try:
+            raw = get_text(title)
+        except Exception as exc:
+            print(f"SKIP {title}: {exc}")
+            continue
         for raw_line in clean(raw).splitlines():
             line = candidate(raw_line)
             if not line:
@@ -98,17 +113,18 @@ def main():
                 "source_url": SOURCE_URL,
                 "source_page": title,
             })
-        if processed % 25 == 0:
-            print(f"pages={processed}/{len(pages)}, unique_records={len(records)}, duplicates={duplicates}")
-        time.sleep(0.05)
+        if i % 20 == 0:
+            print(f"pages={i}/{len(pages)}, unique_records={len(records)}, duplicates={duplicates}")
+        time.sleep(0.03)
+
     if not records:
-        raise RuntimeError(f"Corpus build found 0 records after processing {processed} pages")
+        raise RuntimeError(f"Corpus build found 0 records after processing {len(pages)} pages")
     OUT.write_text(json.dumps({
-        "dataset":"ChatterAi Dal corpus", "version":4,
-        "count":len(records), "pages_processed":processed,
+        "dataset":"ChatterAi Dal corpus", "version":5,
+        "count":len(records), "pages_processed":len(pages),
         "duplicates_removed":duplicates, "proverbs":records
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"SUCCESS: pages={processed}; unique_records={len(records)}; duplicates={duplicates}")
+    print(f"SUCCESS: pages={len(pages)}; unique_records={len(records)}; duplicates={duplicates}")
 
 
 if __name__ == "__main__":
