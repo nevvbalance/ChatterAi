@@ -23,14 +23,17 @@ jobs:
       - name: Build corpus
         run: python data/build_dal_corpus.py
 
+      - name: Classify corpus
+        run: python data/classify_proverbs.py
+
       - name: Commit updated corpus
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/dal_corpus.json
+          git add data/dal_corpus.json data/proverbs.json
           if git diff --cached --quiet; then
             echo "No corpus changes"
           else
-            git commit -m "Update Dal proverb corpus"
+            git commit -m "Update and classify proverb corpus"
             git push
           fi
