@@ -1,12 +1,4 @@
-"""Build a large Russian proverb corpus from public-domain Dal editions.
-
-Sources currently included:
-- Dal, 1862 edition on Wikisource.
-- Dal, 1879 second edition, volumes 1 and 2 where page text is available.
-
-The collector keeps the historical wording, records its source, normalizes
-common pre-reform letters for duplicate detection, and does not invent meanings.
-"""
+"""Build a large Russian proverb corpus from public-domain Dal editions."""
 import json
 import re
 import time
@@ -16,10 +8,10 @@ from urllib.request import Request, urlopen
 
 API = "https://ru.wikisource.org/w/api.php"
 OUT = Path(__file__).resolve().parent / "dal_corpus.json"
+# Start with the verified 1862 namespace. More editions can be added after
+# their exact Wikisource page prefixes are verified.
 PREFIXES = [
     ("1862", "Пословицы русского народа (Даль)/Изд. 1862 (ДО)/", "В. И. Даль, «Пословицы русского народа», 1862"),
-    ("1879-t1", "Страница:Пословицы русского народа (1879, 2-е изд., том 1).pdf/", "В. И. Даль, «Пословицы русского народа», 1879, 2-е изд., том 1"),
-    ("1879-t2", "Страница:Пословицы русского народа (1879, 2-е изд., том 2).pdf/", "В. И. Даль, «Пословицы русского народа», 1879, 2-е изд., том 2"),
 ]
 
 
@@ -32,14 +24,9 @@ def api(params):
 
 
 def normalize(text):
-    table = str.maketrans({
-        "ѣ": "е", "Ѣ": "Е", "і": "и", "І": "И", "ѳ": "ф", "Ѳ": "Ф",
-        "ѵ": "и", "Ѵ": "И",
-    })
-    text = text.translate(table)
-    text = text.replace("ъ", "").replace("Ъ", "")
-    text = re.sub(r"\s+", " ", text).strip(" \t-*•;,: ")
-    return text
+    table = str.maketrans({"ѣ": "е", "Ѣ": "Е", "і": "и", "І": "И", "ѳ": "ф", "Ѳ": "Ф", "ѵ": "и", "Ѵ": "И"})
+    text = text.translate(table).replace("ъ", "").replace("Ъ", "")
+    return re.sub(r"\s+", " ", text).strip(" \t-*•;,: ")
 
 
 def clean_wikitext(raw):
@@ -52,15 +39,10 @@ def clean_wikitext(raw):
 
 def is_candidate(line):
     line = normalize(line)
-    if not line or len(line) < 8 or len(line) > 350:
+    if not line or len(line) < 8 or len(line) > 350 or len(line.split()) > 35:
         return False
-    bad = (
-        "Страница:", "Источник", "Примечан", "Опубл", "автор", "Содержание",
-        "Image", "ISBN", "Google", "Викитека", "Назад", "Вперед", "←", "→",
-    )
-    if line.startswith(bad) or line.startswith(("{{", "[[", "==", "#", "<", "|")):
-        return False
-    return len(line.split()) <= 35
+    bad = ("Страница:", "Источник", "Примечан", "Опубл", "автор", "Содержание", "Image", "ISBN", "Google", "Викитека", "Назад", "Вперед", "←", "→")
+    return not line.startswith(bad) and not line.startswith(("{{", "[[", "==", "#", "<", "|"))
 
 
 def get_pages(prefix):
@@ -68,6 +50,8 @@ def get_pages(prefix):
     cont = {}
     while True:
         data = api({"action": "query", "list": "allpages", "apprefix": prefix, "aplimit": "max", **cont})
+        if "query" not in data:
+            raise RuntimeError(f"Wikisource API error: {data.get('error', data)}")
         pages.extend(p["title"] for p in data["query"]["allpages"])
         if "continue" not in data:
             return pages
@@ -78,52 +62,51 @@ def collect(source_id, prefix, source_name, records, seen):
     pages = get_pages(prefix)
     print(f"{source_id}: {len(pages)} pages")
     for index, title in enumerate(pages, 1):
-        try:
-            data = api({"action": "parse", "page": title, "prop": "wikitext"})
-            raw = data.get("parse", {}).get("wikitext", {}).get("*") or data.get("parse", {}).get("wikitext", "")
-            for line in clean_wikitext(raw).splitlines():
-                line = normalize(line)
-                if not is_candidate(line):
-                    continue
-                key = re.sub(r"[^а-яёa-z0-9]+", " ", line.casefold()).strip()
-                if key in seen:
-                    continue
-                seen.add(key)
-                records.append({
-                    "id": f"dal-{len(records)+1:06d}",
-                    "proverb": line,
-                    "type": "кандидат",
-                    "meaning": "",
-                    "topics": [],
-                    "situations": [],
-                    "keywords": [],
-                    "variants": [],
-                    "source": source_name,
-                    "source_url": "https://ru.wikisource.org/wiki/Пословицы_русского_народа_(Даль)",
-                    "source_page": title,
-                    "source_id": source_id,
-                })
-        except Exception as exc:
-            print(f"skip {title}: {exc}")
+        data = api({"action": "parse", "page": title, "prop": "wikitext"})
+        parsed = data.get("parse", {})
+        raw = parsed.get("wikitext", "")
+        # formatversion=2 returns wikitext as a string. Older responses may
+        # return an object with a '*' field, so support both forms.
+        if isinstance(raw, dict):
+            raw = raw.get("*", "")
+        for line in clean_wikitext(raw).splitlines():
+            line = normalize(line)
+            if not is_candidate(line):
+                continue
+            key = re.sub(r"[^а-яёa-z0-9]+", " ", line.casefold()).strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append({
+                "id": f"dal-{len(records)+1:06d}",
+                "proverb": line,
+                "type": "кандидат",
+                "meaning": "",
+                "topics": [],
+                "situations": [],
+                "keywords": [],
+                "variants": [],
+                "source": source_name,
+                "source_url": "https://ru.wikisource.org/wiki/Пословицы_русского_народа_(Даль)",
+                "source_page": title,
+                "source_id": source_id,
+            })
         if index % 50 == 0:
             print(f"{source_id}: processed {index}/{len(pages)}; records={len(records)}")
         time.sleep(0.05)
 
 
 def main():
-    records = []
-    seen = set()
+    records, seen = [], set()
     for source_id, prefix, source_name in PREFIXES:
         collect(source_id, prefix, source_name, records, seen)
-
-    payload = {
+    OUT.write_text(json.dumps({
         "dataset": "ChatterAi Dal corpus",
-        "version": 2,
+        "version": 3,
         "count": len(records),
         "sources": [name for _, _, name in PREFIXES],
         "proverbs": records,
-    }
-    OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"wrote {OUT}: {len(records)} unique records")
 
 
