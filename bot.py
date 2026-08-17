@@ -3,28 +3,56 @@ import os
 
 from aiohttp import web
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+from data.proverb_loader import search_proverbs
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Привет! 🤖 Я ChatterAi. Бот работает!\n\n"
-        "Напиши /help, чтобы увидеть доступные команды."
+        "Привет! 🤖 Я ChatterAi.\n\n"
+        "Я умею искать подходящие русские пословицы по смыслу.\n"
+        "Просто напиши ситуацию или вопрос.\n\n"
+        "Например: «Стоит ли спешить с важным решением?»"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "/start - запустить бота\n"
-        "/help - показать помощь"
+        "/start — запустить бота\n"
+        "/help — показать помощь\n\n"
+        "Или просто напиши свой вопрос обычным сообщением."
     )
+
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    query = update.message.text.strip()
+    matches = search_proverbs(query, limit=3)
+
+    if not matches:
+        await update.message.reply_text(
+            "Пока не нашёл подходящей пословицы в своей базе. 🧐\n"
+            "Попробуй описать ситуацию немного подробнее."
+        )
+        return
+
+    lines = ["Вот что нашлось в народной мудрости:\n"]
+    for item in matches:
+        lines.append(f"🪶 «{item['proverb']}»")
+        if item.get("meaning"):
+            lines.append(f"   {item['meaning']}")
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines).strip())
 
 
 def create_app() -> web.Application:
     token = os.environ["BOT_TOKEN"]
     public_url = os.environ["RENDER_EXTERNAL_URL"].rstrip("/")
 
-    # A deterministic secret derived from the private bot token.
     webhook_secret = hashlib.sha256(token.encode()).hexdigest()
     webhook_path = f"/telegram/{webhook_secret}"
     webhook_url = f"{public_url}{webhook_path}"
@@ -32,6 +60,7 @@ def create_app() -> web.Application:
     telegram_app = Application.builder().token(token).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     async def on_startup(app: web.Application) -> None:
         await telegram_app.initialize()
