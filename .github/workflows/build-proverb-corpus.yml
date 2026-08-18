@@ -2,6 +2,12 @@ name: Build proverb corpus
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-proverb-corpus.yml"
+      - "data/build_dal_corpus.py"
+      - "data/classify_proverbs.py"
   schedule:
     - cron: "17 3 1 * *"
 
