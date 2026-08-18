@@ -19,7 +19,7 @@ def api(params, retries=6):
     url = API + "?" + urlencode(params)
     for attempt in range(retries):
         try:
-            req = Request(url, headers={"User-Agent": "ChatterAi corpus builder/3.0 (educational research)"})
+            req = Request(url, headers={"User-Agent": "ChatterAi corpus builder/3.1 (educational research)"})
             with urlopen(req, timeout=60) as response:
                 data = json.loads(response.read().decode("utf-8"))
             if "error" in data:
@@ -71,23 +71,25 @@ def category_members(category):
         cont = data["continue"]
 
 
-def get_texts(titles):
-    """Fetch up to 50 pages in one API request, avoiding hundreds of calls."""
+def get_texts(titles, batch_size=8):
+    """Fetch page text in small batches so the GET URL stays safely below server limits."""
     result = {}
-    for start in range(0, len(titles), 50):
-        chunk = titles[start:start + 50]
-        data = api({"action":"query", "prop":"revisions", "rvprop":"content", "rvslots":"main",
-                    "titles":"|".join(chunk)})
+    for start in range(0, len(titles), batch_size):
+        chunk = titles[start:start + batch_size]
+        data = api({
+            "action":"query", "prop":"revisions", "rvprop":"content", "rvslots":"main",
+            "titles":"|".join(chunk)
+        })
         for page in data.get("query", {}).get("pages", []):
             title = page.get("title")
             revisions = page.get("revisions", [])
             if not title or not revisions:
                 continue
-            slots = revisions[0].get("slots", {})
-            main = slots.get("main", {})
+            main = revisions[0].get("slots", {}).get("main", {})
             result[title] = main.get("content", main.get("*", ""))
-        if start + 50 < len(titles):
-            time.sleep(1.5)
+        print(f"Fetched batches: {min(start + batch_size, len(titles))}/{len(titles)}")
+        if start + batch_size < len(titles):
+            time.sleep(2)
     return result
 
 
@@ -120,9 +122,8 @@ def main():
 
     if not records:
         raise RuntimeError(f"Corpus build found 0 candidates after processing {len(pages)} pages")
-    OUT.write_text(json.dumps({"dataset":"ChatterAi Dal corpus", "version":8, "count":len(records), "pages_processed":len(pages), "pages_fetched":len(texts), "duplicates_removed":duplicates, "rejected_lines":rejected, "proverbs":records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    OUT.write_text(json.dumps({"dataset":"ChatterAi Dal corpus", "version":9, "count":len(records), "pages_processed":len(pages), "pages_fetched":len(texts), "duplicates_removed":duplicates, "rejected_lines":rejected, "proverbs":records}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"SUCCESS: pages={len(pages)} fetched={len(texts)} records={len(records)} duplicates={duplicates} rejected={rejected}")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
