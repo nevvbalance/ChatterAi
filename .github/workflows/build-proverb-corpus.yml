@@ -12,19 +12,58 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout current main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: Show revision
+        run: |
+          echo "Running commit: $(git rev-parse HEAD)"
+          echo "build_dal_corpus.py:"
+          head -n 8 data/build_dal_corpus.py
+
       - name: Build corpus
         run: python data/build_dal_corpus.py
 
+      - name: Validate corpus
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("data/dal_corpus.json")
+          if not p.exists():
+              raise SystemExit("dal_corpus.json was not created")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          count = data.get("count", len(data.get("proverbs", [])))
+          print(f"Corpus records: {count}")
+          if count <= 0:
+              raise SystemExit("Corpus is empty")
+          PY
+
       - name: Classify corpus
         run: python data/classify_proverbs.py
+
+      - name: Validate classified corpus
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("data/proverbs.json")
+          if not p.exists():
+              raise SystemExit("proverbs.json was not created")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          count = data.get("count", len(data.get("proverbs", [])))
+          print(f"Classified records: {count}")
+          if count <= 0:
+              raise SystemExit("Classified corpus is empty")
+          PY
 
       - name: Commit updated corpus
         run: |
