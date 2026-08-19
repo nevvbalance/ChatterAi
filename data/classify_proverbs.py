@@ -1,7 +1,7 @@
-"""Deterministic first-pass classifier for the collected Russian folklore corpus.
+"""Deterministic first-pass classifier for the growing Russian folklore corpus.
 
-It does not claim that every classification is perfect. It assigns a conservative
-kind using lexical signals and marks uncertain records for later review.
+Classification is intentionally conservative. Uncertain records stay in the corpus and
+are marked for later semantic review instead of being silently discarded.
 """
 import json
 import re
@@ -27,7 +27,24 @@ TOPICS = {
     "время": ["врем", "день", "год", "час", "век", "утр", "вечер"],
     "терпение": ["терп", "поспеш", "тороп", "жд", "медл"],
     "характер": ["нрав", "характер", "смел", "страх", "горд", "скром"],
+    "любовь": ["любов", "любить", "сердц", "мил", "жених", "невест"],
+    "жизнь": ["жизн", "смерт", "судьб", "долг", "старост", "молод"],
+    "здоровье": ["здоров", "болезн", "болен", "лекар", "врач"],
+    "природа": ["земл", "вод", "лес", "рек", "дожд", "солнц", "ветр", "мороз"],
+    "дом и хозяйство": ["дом", "хозяй", "двор", "печ", "изб", "урож", "скот"],
 }
+
+SITUATIONS = {
+    "совет": ["надо", "нужно", "следует", "не стоит", "берегись", "помни"],
+    "предупреждение": ["бойся", "берегись", "не доверяй", "опас"],
+    "дружба": ["друг", "дружб", "товарищ"],
+    "работа": ["труд", "работ", "дело", "пахат"],
+    "отношения": ["любов", "жена", "муж", "друг", "родн"],
+    "деньги": ["деньг", "рубл", "богат", "бедн"],
+    "ошибка": ["ошиб", "винов", "поспеш", "неразум"],
+}
+
+STOP = {"который", "которая", "которые", "чтобы", "если", "тогда", "этого", "этот", "такие", "такой"}
 
 
 def classify(text):
@@ -35,38 +52,38 @@ def classify(text):
     for kind, signals in RULES.items():
         if any(s in low for s in signals):
             return kind, "rule"
-    # Short aphoristic lines are retained as candidates for semantic review.
     return "пословица-кандидат", "uncertain"
 
 
-def topics(text):
+def matched_groups(text, groups):
     low = text.casefold()
-    return [topic for topic, signals in TOPICS.items() if any(s in low for s in signals)]
+    return [name for name, signals in groups.items() if any(s in low for s in signals)]
 
 
 def keywords(text):
     words = re.findall(r"[а-яё]{4,}", text.casefold())
-    stop = {"который", "которая", "которые", "чтобы", "если", "тогда", "этого", "этот", "такие", "такой"}
-    return list(dict.fromkeys(w for w in words if w not in stop))[:20]
+    return list(dict.fromkeys(w for w in words if w not in STOP))[:20]
 
 
 def main():
     payload = json.loads(DATA.read_text(encoding="utf-8"))
     out = []
     for item in payload.get("proverbs", []):
-        kind, confidence = classify(item["proverb"])
+        text = item["proverb"]
+        kind, confidence = classify(text)
         out.append({
             **item,
             "type": kind,
             "classification_confidence": confidence,
-            "topics": topics(item["proverb"]),
-            "keywords": keywords(item["proverb"]),
+            "topics": matched_groups(text, TOPICS),
+            "situations": matched_groups(text, SITUATIONS),
+            "keywords": keywords(text),
             "meaning": item.get("meaning", ""),
-            "review_required": confidence == "uncertain",
+            "review_required": confidence == "uncertain" or not matched_groups(text, TOPICS),
         })
     result = {
         "dataset": "ChatterAi Russian folklore corpus",
-        "version": 1,
+        "version": 2,
         "count": len(out),
         "proverbs": out,
     }
@@ -74,5 +91,4 @@ def main():
     print(f"wrote {OUT}: {len(out)} records")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
