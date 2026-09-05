@@ -32,17 +32,14 @@ async def _get(endpoint: str) -> Any:
 
 
 async def get_collections() -> Any:
-    """Simple API connectivity test using the collections endpoint."""
     return await _get("/v1/collections/")
 
 
 async def get_rent_numbers() -> Any:
-    """Get anonymous numbers currently available for rent."""
     return await _get("/v1/rent/numbers/")
 
 
 async def get_numbers_history() -> Any:
-    """Get rental history for anonymous numbers."""
     return await _get("/v1/rent/numbers/history/")
 
 
@@ -55,7 +52,6 @@ def _format_value(value: Any) -> str:
 
 
 def format_result(data: Any) -> str:
-    """Turn a generic Marketapp response into a compact Telegram message."""
     if isinstance(data, list):
         return f"Marketapp API ответил успешно. Получено объектов: {len(data)}"
 
@@ -70,7 +66,6 @@ def format_result(data: Any) -> str:
 
 
 def format_debug(data: Any) -> list[str]:
-    """Return the raw API response in Telegram-safe chunks for diagnostics."""
     if isinstance(data, str):
         raw = data
     else:
@@ -83,12 +78,15 @@ def format_debug(data: Any) -> list[str]:
 
 
 def _format_duration(seconds: Any) -> str:
-    """Convert a Marketapp duration in seconds into a human-readable period."""
     try:
-        days = int(seconds) // 86400
+        total = int(seconds)
     except (TypeError, ValueError):
         return str(seconds)
 
+    days = total // 86400
+    if days == 0:
+        hours = total // 3600
+        return f"{hours} ч."
     if days == 1:
         return "1 день"
     if 2 <= days <= 4:
@@ -97,40 +95,69 @@ def _format_duration(seconds: Any) -> str:
 
 
 def _short_address(address: Any) -> str:
-    """Keep blockchain addresses recognizable without filling the Telegram message."""
     if not isinstance(address, str) or len(address) < 12:
         return str(address)
     return f"{address[:6]}…{address[-6:]}"
 
 
 def _extract_items(data: Any) -> tuple[list[Any], bool]:
-    """Extract the rental list and indicate whether the response is a plain list."""
+    """Extract an API item list from common response shapes."""
     if isinstance(data, list):
         return data, True
-    if isinstance(data, dict):
-        items = next((value for value in data.values() if isinstance(value, list)), None)
-        if items is not None:
-            return items, False
+    if not isinstance(data, dict):
+        return [], False
+
+    for key in ("items", "results", "data", "nfts", "numbers"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value, False
+
+    for value in data.values():
+        if isinstance(value, list):
+            return value, False
+
     return [], False
+
+
+def number_key(item: Any) -> str:
+    """Return a stable identifier for an available number."""
+    if not isinstance(item, dict):
+        return str(item)
+    return str(
+        item.get("address")
+        or item.get("nft_address")
+        or item.get("id")
+        or item.get("name")
+        or item.get("number")
+        or "unknown"
+    )
+
+
+def number_name(item: Any) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    return str(item.get("name") or item.get("nft_name") or item.get("number") or number_key(item))
+
+
+def number_price(item: Any) -> tuple[Any, str]:
+    if not isinstance(item, dict):
+        return None, ""
+    for key in ("price", "rent_price", "price_ton", "price_gram"):
+        if item.get(key) is not None:
+            return item.get(key), str(item.get("currency") or ("GRAM" if key == "price_gram" else "TON"))
+    return None, str(item.get("currency") or "")
 
 
 def _format_number_item(index: int, item: Any) -> str:
     if not isinstance(item, dict):
         return f"<b>{index}. 📱 {html.escape(str(item))}</b>"
 
-    number = html.escape(
-        str(item.get("nft_name") or item.get("name") or item.get("number") or "Без номера")
-    )
+    number = html.escape(number_name(item))
     min_duration = item.get("min_duration")
     max_duration = item.get("max_duration")
     owner = item.get("owner")
-    nft_address = item.get("nft_address")
-
-    price = item.get("price")
-    if price is None:
-        price = item.get("rent_price")
-    if price is None:
-        price = item.get("price_ton")
+    nft_address = item.get("nft_address") or item.get("address")
+    price, currency = number_price(item)
 
     if min_duration is not None and max_duration is not None:
         duration = f"{_format_duration(min_duration)} → {_format_duration(max_duration)}"
@@ -142,10 +169,9 @@ def _format_number_item(index: int, item: Any) -> str:
         duration = "срок не указан"
 
     lines = [f"<b>{index}. 📱 {number}</b>"]
-
     if price is not None:
-        lines.append(f"   💰 Цена: <b>{html.escape(str(price))} TON</b>")
-
+        suffix = f" {html.escape(currency)}" if currency else ""
+        lines.append(f"   💰 Цена: <b>{html.escape(str(price))}{suffix}</b>")
     lines.append(f"   ⏱ {duration}")
 
     if owner:
@@ -157,9 +183,7 @@ def _format_number_item(index: int, item: Any) -> str:
 
 
 def format_numbers(data: Any) -> list[str]:
-    """Format all rental numbers into Telegram-safe messages, never exceeding 4096 chars."""
     items, _ = _extract_items(data)
-
     if not items:
         return [format_result(data)]
 
@@ -170,7 +194,6 @@ def format_numbers(data: Any) -> list[str]:
     for index, item in enumerate(items, 1):
         entry = _format_number_item(index, item)
         candidate = f"{current}\n\n{entry}"
-
         if len(candidate) > TELEGRAM_MESSAGE_LIMIT:
             chunks.append(current)
             current = entry
@@ -179,5 +202,47 @@ def format_numbers(data: Any) -> list[str]:
 
     if current:
         chunks.append(current)
-
     return chunks
+
+
+def build_number_snapshot(data: Any) -> dict[str, dict[str, Any]]:
+    """Build a stable snapshot of the currently available number pool."""
+    items, _ = _extract_items(data)
+    snapshot: dict[str, dict[str, Any]] = {}
+    for item in items:
+        key = number_key(item)
+        if key == "unknown":
+            continue
+        price, currency = number_price(item)
+        snapshot[key] = {
+            "name": number_name(item),
+            "price": str(price) if price is not None else None,
+            "currency": currency,
+            "item": item,
+        }
+    return snapshot
+
+
+def format_monitor_event(kind: str, current: dict[str, Any] | None, previous: dict[str, Any] | None = None) -> str:
+    """Format a single pool-change event for Telegram."""
+    item = current or previous or {}
+    name = html.escape(str(item.get("name") or "номер"))
+    price = item.get("price")
+    currency = html.escape(str(item.get("currency") or ""))
+    price_text = f"\n💰 Цена: <b>{html.escape(str(price))} {currency}</b>" if price is not None else ""
+
+    if kind == "new":
+        return f"🟢 <b>Новый номер в пуле</b>\n📱 {name}{price_text}"
+    if kind == "removed":
+        return f"🔴 <b>Номер исчез из пула</b>\n📱 {name}\nВозможная причина: аренда или снятие с аренды.{price_text}"
+    if kind == "returned":
+        return f"🔵 <b>Номер вернулся в пул</b>\n📱 {name}{price_text}"
+    if kind == "price":
+        old_price = previous.get("price") if previous else None
+        old_currency = previous.get("currency") if previous else ""
+        return (
+            f"🟡 <b>Изменилась цена</b>\n📱 {name}\n"
+            f"Было: <b>{html.escape(str(old_price))} {html.escape(str(old_currency))}</b>\n"
+            f"Стало: <b>{html.escape(str(price))} {currency}</b>"
+        )
+    return f"ℹ️ <b>Изменение номера</b>\n📱 {name}{price_text}"
