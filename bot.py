@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import os
+import time
 
 from aiohttp import web
 from telegram import Update
@@ -28,19 +29,40 @@ class NumberMonitor:
         self.ever_seen: set[str] = set()
         self.task: asyncio.Task | None = None
         self.running = False
+        self.cycle = 0
 
     async def poll(self, application: Application) -> None:
+        self.cycle += 1
+        cycle_started = time.monotonic()
+        print(
+            f"Marketapp monitor poll #{self.cycle}: checking pool...",
+            flush=True,
+        )
+
         try:
             data = await get_rent_numbers()
             current = build_number_snapshot(data)
         except Exception as exc:
-            print(f"Marketapp monitor error: {exc!r}", flush=True)
+            print(
+                f"Marketapp monitor poll #{self.cycle}: ERROR {exc!r}",
+                flush=True,
+            )
             return
+
+        elapsed = time.monotonic() - cycle_started
+        print(
+            f"Marketapp monitor poll #{self.cycle}: received {len(current)} numbers "
+            f"in {elapsed:.2f}s",
+            flush=True,
+        )
 
         if self.previous is None:
             self.previous = current
             self.ever_seen.update(current)
-            print(f"Marketapp monitor baseline: {len(current)} numbers", flush=True)
+            print(
+                f"Marketapp monitor baseline: {len(current)} numbers",
+                flush=True,
+            )
             return
 
         previous = self.previous
@@ -64,6 +86,17 @@ class NumberMonitor:
         self.ever_seen.update(current_keys)
         self.previous = current
 
+        if events:
+            print(
+                f"Marketapp monitor poll #{self.cycle}: detected {len(events)} event(s)",
+                flush=True,
+            )
+        else:
+            print(
+                f"Marketapp monitor poll #{self.cycle}: no changes",
+                flush=True,
+            )
+
         if not self.chat_id or not events:
             return
 
@@ -83,12 +116,20 @@ class NumberMonitor:
         try:
             while self.running:
                 await self.poll(application)
+                print(
+                    f"Marketapp monitor: next poll in {MONITOR_INTERVAL}s",
+                    flush=True,
+                )
                 await asyncio.sleep(MONITOR_INTERVAL)
         except asyncio.CancelledError:
             print("Marketapp monitor cancelled", flush=True)
             raise
+        except Exception as exc:
+            print(f"Marketapp monitor loop CRASHED: {exc!r}", flush=True)
+            raise
         finally:
             self.running = False
+            print("Marketapp monitor stopped", flush=True)
 
     def start(self, application: Application) -> None:
         if self.task and not self.task.done():
