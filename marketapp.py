@@ -1,3 +1,4 @@
+import html
 import os
 from typing import Any
 
@@ -5,6 +6,7 @@ import aiohttp
 
 
 BASE_URL = "https://api.marketapp.org"
+TELEGRAM_MESSAGE_LIMIT = 4096
 
 
 async def _get(endpoint: str) -> Any:
@@ -82,52 +84,70 @@ def _short_address(address: Any) -> str:
     return f"{address[:6]}…{address[-6:]}"
 
 
-def format_numbers(data: Any) -> str:
-    """Format all available rental numbers into one compact Telegram message."""
+def _extract_items(data: Any) -> tuple[list[Any], bool]:
+    """Extract the rental list and indicate whether the response is a plain list."""
     if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
+        return data, True
+    if isinstance(data, dict):
         items = next((value for value in data.values() if isinstance(value, list)), None)
-        if items is None:
-            return format_result(data)
+        if items is not None:
+            return items, False
+    return [], False
+
+
+def _format_number_item(index: int, item: Any) -> str:
+    if not isinstance(item, dict):
+        return f"<b>{index}. 📱 {html.escape(str(item))}</b>"
+
+    number = html.escape(str(item.get("nft_name") or item.get("name") or "Без номера"))
+    min_duration = item.get("min_duration")
+    max_duration = item.get("max_duration")
+    owner = item.get("owner")
+    nft_address = item.get("nft_address")
+
+    if min_duration is not None and max_duration is not None:
+        duration = f"{_format_duration(min_duration)} → {_format_duration(max_duration)}"
+    elif min_duration is not None:
+        duration = f"от {_format_duration(min_duration)}"
+    elif max_duration is not None:
+        duration = f"до {_format_duration(max_duration)}"
     else:
-        return format_result(data)
+        duration = "срок не указан"
 
-    if not items:
-        return "📱 Сейчас доступных номеров для аренды не найдено."
+    lines = [f"<b>{index}. 📱 {number}</b>", f"   ⏱ {duration}"]
 
-    lines = [
-        f"📱 <b>Доступно номеров: {len(items)}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    for index, item in enumerate(items, 1):
-        if not isinstance(item, dict):
-            lines.append(f"{index}. 📱 <b>{item}</b>")
-            continue
-
-        number = item.get("nft_name") or item.get("name") or "Без номера"
-        min_duration = item.get("min_duration")
-        max_duration = item.get("max_duration")
-        owner = item.get("owner")
-        nft_address = item.get("nft_address")
-
-        if min_duration is not None and max_duration is not None:
-            duration = f"{_format_duration(min_duration)} → {_format_duration(max_duration)}"
-        elif min_duration is not None:
-            duration = f"от {_format_duration(min_duration)}"
-        elif max_duration is not None:
-            duration = f"до {_format_duration(max_duration)}"
-        else:
-            duration = "срок не указан"
-
-        # Keep the complete 36-number list comfortably below Telegram's limit.
-        lines.append(f"\n<b>{index}. 📱 {number}</b>")
-        lines.append(f"   ⏱ {duration}")
-
-        if owner:
-            lines.append(f"   👤 <code>{_short_address(owner)}</code>")
-        if nft_address:
-            lines.append(f"   🔗 <code>{_short_address(nft_address)}</code>")
+    if owner:
+        lines.append(f"   👤 <code>{html.escape(_short_address(owner))}</code>")
+    if nft_address:
+        lines.append(f"   🔗 <code>{html.escape(_short_address(nft_address))}</code>")
 
     return "\n".join(lines)
+
+
+def format_numbers(data: Any) -> list[str]:
+    """Format all rental numbers into Telegram-safe messages, never exceeding 4096 chars."""
+    items, _ = _extract_items(data)
+
+    if not items:
+        if isinstance(data, (dict, list)):
+            return ["📱 Сейчас доступных номеров для аренды не найдено."]
+        return [format_result(data)]
+
+    header = f"📱 <b>Доступно номеров: {len(items)}</b>\n━━━━━━━━━━━━━━━━━━━━"
+    chunks: list[str] = []
+    current = header
+
+    for index, item in enumerate(items, 1):
+        entry = _format_number_item(index, item)
+        candidate = f"{current}\n\n{entry}"
+
+        if len(candidate) > TELEGRAM_MESSAGE_LIMIT:
+            chunks.append(current)
+            current = entry
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+
+    return chunks
