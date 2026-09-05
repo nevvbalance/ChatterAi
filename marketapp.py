@@ -1,4 +1,5 @@
 import html
+import json
 import os
 from typing import Any
 
@@ -25,8 +26,8 @@ async def _get(endpoint: str) -> Any:
                 raise RuntimeError(f"Marketapp API HTTP {response.status}: {text[:500]}")
 
             try:
-                return await response.json()
-            except Exception:
+                return json.loads(text)
+            except json.JSONDecodeError:
                 return text
 
 
@@ -38,6 +39,11 @@ async def get_collections() -> Any:
 async def get_rent_numbers() -> Any:
     """Get anonymous numbers currently available for rent."""
     return await _get("/v1/rent/numbers/")
+
+
+async def get_numbers_history() -> Any:
+    """Get rental history for anonymous numbers."""
+    return await _get("/v1/rent/numbers/history/")
 
 
 def _format_value(value: Any) -> str:
@@ -61,6 +67,19 @@ def format_result(data: Any) -> str:
         return "Marketapp API ответил успешно:\n\n" + "\n".join(parts)
 
     return f"Marketapp API ответил успешно:\n\n{str(data)[:1500]}"
+
+
+def format_debug(data: Any) -> list[str]:
+    """Return the raw API response in Telegram-safe chunks for diagnostics."""
+    if isinstance(data, str):
+        raw = data
+    else:
+        raw = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+    chunks: list[str] = []
+    for start in range(0, len(raw), TELEGRAM_MESSAGE_LIMIT):
+        chunks.append(raw[start:start + TELEGRAM_MESSAGE_LIMIT])
+    return chunks or ["<пустой ответ>"]
 
 
 def _format_duration(seconds: Any) -> str:
@@ -99,11 +118,19 @@ def _format_number_item(index: int, item: Any) -> str:
     if not isinstance(item, dict):
         return f"<b>{index}. 📱 {html.escape(str(item))}</b>"
 
-    number = html.escape(str(item.get("nft_name") or item.get("name") or "Без номера"))
+    number = html.escape(
+        str(item.get("nft_name") or item.get("name") or item.get("number") or "Без номера")
+    )
     min_duration = item.get("min_duration")
     max_duration = item.get("max_duration")
     owner = item.get("owner")
     nft_address = item.get("nft_address")
+
+    price = item.get("price")
+    if price is None:
+        price = item.get("rent_price")
+    if price is None:
+        price = item.get("price_ton")
 
     if min_duration is not None and max_duration is not None:
         duration = f"{_format_duration(min_duration)} → {_format_duration(max_duration)}"
@@ -114,7 +141,12 @@ def _format_number_item(index: int, item: Any) -> str:
     else:
         duration = "срок не указан"
 
-    lines = [f"<b>{index}. 📱 {number}</b>", f"   ⏱ {duration}"]
+    lines = [f"<b>{index}. 📱 {number}</b>"]
+
+    if price is not None:
+        lines.append(f"   💰 Цена: <b>{html.escape(str(price))} TON</b>")
+
+    lines.append(f"   ⏱ {duration}")
 
     if owner:
         lines.append(f"   👤 <code>{html.escape(_short_address(owner))}</code>")
@@ -129,8 +161,6 @@ def format_numbers(data: Any) -> list[str]:
     items, _ = _extract_items(data)
 
     if not items:
-        if isinstance(data, (dict, list)):
-            return ["📱 Сейчас доступных номеров для аренды не найдено."]
         return [format_result(data)]
 
     header = f"📱 <b>Доступно номеров: {len(items)}</b>\n━━━━━━━━━━━━━━━━━━━━"
