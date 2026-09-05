@@ -10,6 +10,7 @@ from marketapp import format_numbers, format_result, get_collections, get_rent_n
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /start handler received an update", flush=True)
     await update.message.reply_text(
         "Привет! 🤖 Я ChatterAi.\n\n"
         "Я ищу подходящие русские пословицы и использую их смысл, чтобы ответить на твою ситуацию.\n\n"
@@ -19,6 +20,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /help handler received an update", flush=True)
     await update.message.reply_text(
         "/start — запустить бота\n"
         "/help — показать помощь\n"
@@ -29,23 +31,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def marketapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /marketapp handler received an update", flush=True)
     await update.message.reply_text("Проверяю Marketapp API... 🔎")
 
     try:
         data = await get_collections()
         await update.message.reply_text(format_result(data))
     except Exception as exc:
+        print(f"Marketapp /marketapp error: {exc!r}", flush=True)
         await update.message.reply_text(f"Ошибка Marketapp API: {exc}")
 
 
 async def numbers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /numbers handler received an update", flush=True)
     await update.message.reply_text("Смотрю доступные номера в Marketapp... 📱🔎")
 
     try:
         data = await get_rent_numbers()
         await update.message.reply_text(format_numbers(data))
     except Exception as exc:
+        print(f"Marketapp /numbers error: {exc!r}", flush=True)
         await update.message.reply_text(f"Ошибка Marketapp API: {exc}")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print(f"Telegram handler error: {context.error!r}", flush=True)
 
 
 def build_answer(query: str, matches: list[dict]) -> str:
@@ -71,6 +81,8 @@ def build_answer(query: str, matches: list[dict]) -> str:
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
+
+    print("Telegram text message handler received an update", flush=True)
 
     query = update.message.text.strip()
     if len(query) < 3:
@@ -103,10 +115,14 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("marketapp", marketapp_command))
     telegram_app.add_handler(CommandHandler("numbers", numbers_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    telegram_app.add_error_handler(error_handler)
 
     async def on_startup(app: web.Application) -> None:
+        print("Telegram startup: initializing application", flush=True)
         await telegram_app.initialize()
         await telegram_app.start()
+        print("Telegram startup: application started, setting webhook", flush=True)
+
         await telegram_app.bot.set_webhook(
             url=webhook_url,
             secret_token=webhook_secret,
@@ -118,13 +134,16 @@ def create_app() -> web.Application:
             "Telegram webhook configured: "
             f"active={bool(webhook_info.url)}, "
             f"pending_updates={webhook_info.pending_update_count}, "
-            f"last_error={webhook_info.last_error_message!r}"
+            f"last_error={webhook_info.last_error_message!r}, "
+            f"last_error_date={webhook_info.last_error_date!r}",
+            flush=True,
         )
 
     async def on_cleanup(app: web.Application) -> None:
         # Do not delete the webhook here. During a Render redeploy the old
         # instance can shut down after the new instance has configured the
         # webhook, which would leave Telegram with no webhook at all.
+        print("Telegram cleanup: stopping application without deleting webhook", flush=True)
         await telegram_app.stop()
         await telegram_app.shutdown()
 
@@ -133,12 +152,23 @@ def create_app() -> web.Application:
 
     async def telegram_webhook(request: web.Request) -> web.Response:
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != webhook_secret:
+            print("Telegram webhook: rejected request with invalid secret", flush=True)
             return web.Response(status=403, text="Forbidden")
 
-        data = await request.json()
-        update = Update.de_json(data, telegram_app.bot)
-        await telegram_app.update_queue.put(update)
-        return web.Response(text="OK")
+        try:
+            data = await request.json()
+            update = Update.de_json(data, telegram_app.bot)
+            if update is None:
+                print("Telegram webhook: received an empty/invalid update", flush=True)
+                return web.Response(text="OK")
+
+            print(f"Telegram webhook: received update {update.update_id}", flush=True)
+            await telegram_app.update_queue.put(update)
+            print(f"Telegram webhook: queued update {update.update_id}", flush=True)
+            return web.Response(text="OK")
+        except Exception as exc:
+            print(f"Telegram webhook error: {exc!r}", flush=True)
+            return web.Response(status=500, text="Webhook error")
 
     app = web.Application()
     app.router.add_get("/", health)
