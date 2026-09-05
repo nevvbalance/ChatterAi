@@ -83,7 +83,7 @@ def _short_address(address: Any) -> str:
 
 
 def format_numbers(data: Any) -> str:
-    """Format all available rental numbers as a readable Telegram list."""
+    """Format all available rental numbers into one compact Telegram message."""
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
@@ -97,13 +97,13 @@ def format_numbers(data: Any) -> str:
         return "📱 Сейчас доступных номеров для аренды не найдено."
 
     lines = [
-        f"📱 Номера в аренде: {len(items)}",
+        f"📱 <b>Доступно номеров: {len(items)}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
     for index, item in enumerate(items, 1):
         if not isinstance(item, dict):
-            lines.append(f"\n{index}. 📱 {item}")
+            lines.append(f"{index}. 📱 <b>{item}</b>")
             continue
 
         number = item.get("nft_name") or item.get("name") or "Без номера"
@@ -121,12 +121,13 @@ def format_numbers(data: Any) -> str:
         else:
             duration = "срок не указан"
 
-        lines.append(f"\n{index}. 📱 <b>{number}</b>")
+        # Keep the complete 36-number list comfortably below Telegram's limit.
+        lines.append(f"\n<b>{index}. 📱 {number}</b>")
         lines.append(f"   ⏱ {duration}")
 
         if owner:
-            lines.append(f"   👤 Владелец: <code>{_short_address(owner)}</code>")
+            lines.append(f"   👤 <code>{_short_address(owner)}</code>")
         if nft_address:
-            lines.append(f"   🔗 NFT: <code>{_short_address(nft_address)}</code>")
+            lines.append(f"   🔗 <code>{_short_address(nft_address)}</code>")
 
     return "\n".join(lines)
