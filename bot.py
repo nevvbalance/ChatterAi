@@ -46,7 +46,6 @@ class NumberMonitor:
         previous = self.previous
         current_keys = set(current)
         previous_keys = set(previous)
-
         events: list[str] = []
 
         for key in sorted(current_keys - previous_keys):
@@ -176,8 +175,8 @@ async def monitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     number_monitor.chat_id = update.effective_chat.id
     number_monitor.start(context.application)
-
     status = "уже был включён" if number_monitor.previous is not None else "включён"
+
     await update.message.reply_text(
         f"👀 Мониторинг Marketapp {status}.\n\n"
         f"Проверяю пул каждые {MONITOR_INTERVAL} сек.\n"
@@ -190,6 +189,7 @@ async def monitor_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     print("Telegram /monitor_off handler received an update", flush=True)
     if update.effective_chat and number_monitor.chat_id == update.effective_chat.id:
         number_monitor.chat_id = None
+        await number_monitor.stop()
         await update.message.reply_text("🛑 Мониторинг уведомлений выключен.")
     else:
         await update.message.reply_text("Мониторинг для этого чата не был включён.")
@@ -262,7 +262,6 @@ def create_app() -> web.Application:
         print("Telegram startup: initializing application", flush=True)
         await telegram_app.initialize()
         await telegram_app.start()
-        number_monitor.start(telegram_app)
         print("Telegram startup: application started, setting webhook", flush=True)
 
         await telegram_app.bot.set_webhook(
