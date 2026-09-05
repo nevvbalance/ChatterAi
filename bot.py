@@ -113,8 +113,18 @@ def create_app() -> web.Application:
             allowed_updates=Update.ALL_TYPES,
         )
 
+        webhook_info = await telegram_app.bot.get_webhook_info()
+        print(
+            "Telegram webhook configured: "
+            f"active={bool(webhook_info.url)}, "
+            f"pending_updates={webhook_info.pending_update_count}, "
+            f"last_error={webhook_info.last_error_message!r}"
+        )
+
     async def on_cleanup(app: web.Application) -> None:
-        await telegram_app.bot.delete_webhook()
+        # Do not delete the webhook here. During a Render redeploy the old
+        # instance can shut down after the new instance has configured the
+        # webhook, which would leave Telegram with no webhook at all.
         await telegram_app.stop()
         await telegram_app.shutdown()
 
