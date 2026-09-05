@@ -61,12 +61,32 @@ def format_result(data: Any) -> str:
     return f"Marketapp API ответил успешно:\n\n{str(data)[:1500]}"
 
 
+def _format_duration(seconds: Any) -> str:
+    """Convert a Marketapp duration in seconds into a human-readable period."""
+    try:
+        days = int(seconds) // 86400
+    except (TypeError, ValueError):
+        return str(seconds)
+
+    if days == 1:
+        return "1 день"
+    if 2 <= days <= 4:
+        return f"{days} дня"
+    return f"{days} дней"
+
+
+def _short_address(address: Any) -> str:
+    """Keep blockchain addresses recognizable without filling the Telegram message."""
+    if not isinstance(address, str) or len(address) < 12:
+        return str(address)
+    return f"{address[:6]}…{address[-6:]}"
+
+
 def format_numbers(data: Any) -> str:
-    """Format the available-rental response without exposing a huge raw JSON dump."""
+    """Format all available rental numbers as a readable Telegram list."""
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        # The API may wrap the items under a common collection key.
         items = next((value for value in data.values() if isinstance(value, list)), None)
         if items is None:
             return format_result(data)
@@ -76,21 +96,37 @@ def format_numbers(data: Any) -> str:
     if not items:
         return "📱 Сейчас доступных номеров для аренды не найдено."
 
-    lines = [f"📱 Доступно номеров: {len(items)}", ""]
-    for index, item in enumerate(items[:10], 1):
-        if isinstance(item, dict):
-            useful = []
-            for key, value in item.items():
-                if isinstance(value, (str, int, float, bool)) or value is None:
-                    useful.append(f"{key}: {value}")
-                if len(useful) >= 5:
-                    break
-            details = " | ".join(useful) if useful else "данные объекта доступны"
-            lines.append(f"{index}. {details}")
-        else:
-            lines.append(f"{index}. {item}")
+    lines = [
+        f"📱 Номера в аренде: {len(items)}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
 
-    if len(items) > 10:
-        lines.append(f"\nПоказаны первые 10 из {len(items)}.")
+    for index, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            lines.append(f"\n{index}. 📱 {item}")
+            continue
+
+        number = item.get("nft_name") or item.get("name") or "Без номера"
+        min_duration = item.get("min_duration")
+        max_duration = item.get("max_duration")
+        owner = item.get("owner")
+        nft_address = item.get("nft_address")
+
+        if min_duration is not None and max_duration is not None:
+            duration = f"{_format_duration(min_duration)} → {_format_duration(max_duration)}"
+        elif min_duration is not None:
+            duration = f"от {_format_duration(min_duration)}"
+        elif max_duration is not None:
+            duration = f"до {_format_duration(max_duration)}"
+        else:
+            duration = "срок не указан"
+
+        lines.append(f"\n{index}. 📱 <b>{number}</b>")
+        lines.append(f"   ⏱ {duration}")
+
+        if owner:
+            lines.append(f"   👤 Владелец: <code>{_short_address(owner)}</code>")
+        if nft_address:
+            lines.append(f"   🔗 NFT: <code>{_short_address(nft_address)}</code>")
 
     return "\n".join(lines)
