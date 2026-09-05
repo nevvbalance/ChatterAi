@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from data.proverb_loader import search_proverbs
+from marketapp import format_result, get_collections
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -20,9 +21,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "/start — запустить бота\n"
-        "/help — показать помощь\n\n"
+        "/help — показать помощь\n"
+        "/marketapp — проверить запрос к Marketapp API\n\n"
         "Просто напиши ситуацию или вопрос, и я подберу подходящую народную мудрость."
     )
+
+
+async def marketapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Проверяю Marketapp API... 🔎")
+
+    try:
+        data = await get_collections()
+        await update.message.reply_text(format_result(data))
+    except Exception as exc:
+        await update.message.reply_text(f"Ошибка Marketapp API: {exc}")
 
 
 def build_answer(query: str, matches: list[dict]) -> str:
@@ -77,6 +89,7 @@ def create_app() -> web.Application:
     telegram_app = Application.builder().token(token).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("marketapp", marketapp_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     async def on_startup(app: web.Application) -> None:
