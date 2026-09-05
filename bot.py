@@ -48,7 +48,9 @@ async def numbers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         data = await get_rent_numbers()
-        await update.message.reply_text(format_numbers(data))
+        messages = format_numbers(data)
+        for message in messages:
+            await update.message.reply_text(message, parse_mode="HTML")
     except Exception as exc:
         print(f"Marketapp /numbers error: {exc!r}", flush=True)
         await update.message.reply_text(f"Ошибка Marketapp API: {exc}")
@@ -140,9 +142,6 @@ def create_app() -> web.Application:
         )
 
     async def on_cleanup(app: web.Application) -> None:
-        # Do not delete the webhook here. During a Render redeploy the old
-        # instance can shut down after the new instance has configured the
-        # webhook, which would leave Telegram with no webhook at all.
         print("Telegram cleanup: stopping application without deleting webhook", flush=True)
         await telegram_app.stop()
         await telegram_app.shutdown()
