@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from data.proverb_loader import search_proverbs
-from marketapp import format_numbers, format_result, get_collections, get_rent_numbers
+from marketapp import format_debug, format_numbers, format_result, get_collections, get_numbers_history, get_rent_numbers
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -25,7 +25,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start — запустить бота\n"
         "/help — показать помощь\n"
         "/marketapp — проверить запрос к Marketapp API\n"
-        "/numbers — показать доступные для аренды номера\n\n"
+        "/numbers — показать доступные для аренды номера\n"
+        "/history — посмотреть структуру истории аренды номеров\n\n"
         "Просто напиши ситуацию или вопрос, и я подберу подходящую народную мудрость."
     )
 
@@ -53,6 +54,19 @@ async def numbers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(message, parse_mode="HTML")
     except Exception as exc:
         print(f"Marketapp /numbers error: {exc!r}", flush=True)
+        await update.message.reply_text(f"Ошибка Marketapp API: {exc}")
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /history handler received an update", flush=True)
+    await update.message.reply_text("Запрашиваю историю аренды номеров в Marketapp... 🧾🔎")
+
+    try:
+        data = await get_numbers_history()
+        for message in format_debug(data):
+            await update.message.reply_text(message)
+    except Exception as exc:
+        print(f"Marketapp /history error: {exc!r}", flush=True)
         await update.message.reply_text(f"Ошибка Marketapp API: {exc}")
 
 
@@ -116,6 +130,7 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("marketapp", marketapp_command))
     telegram_app.add_handler(CommandHandler("numbers", numbers_command))
+    telegram_app.add_handler(CommandHandler("history", history_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(error_handler)
 
