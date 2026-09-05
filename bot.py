@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 
@@ -6,7 +7,107 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from data.proverb_loader import search_proverbs
-from marketapp import format_debug, format_numbers, format_result, get_collections, get_numbers_history, get_rent_numbers
+from marketapp import (
+    build_number_snapshot,
+    format_debug,
+    format_monitor_event,
+    format_numbers,
+    format_result,
+    get_collections,
+    get_numbers_history,
+    get_rent_numbers,
+)
+
+MONITOR_INTERVAL = int(os.environ.get("MARKETAPP_MONITOR_INTERVAL", "90"))
+
+
+class NumberMonitor:
+    def __init__(self) -> None:
+        self.chat_id: int | None = None
+        self.previous: dict[str, dict] | None = None
+        self.ever_seen: set[str] = set()
+        self.task: asyncio.Task | None = None
+        self.running = False
+
+    async def poll(self, application: Application) -> None:
+        try:
+            data = await get_rent_numbers()
+            current = build_number_snapshot(data)
+        except Exception as exc:
+            print(f"Marketapp monitor error: {exc!r}", flush=True)
+            return
+
+        if self.previous is None:
+            self.previous = current
+            self.ever_seen.update(current)
+            print(f"Marketapp monitor baseline: {len(current)} numbers", flush=True)
+            return
+
+        previous = self.previous
+        current_keys = set(current)
+        previous_keys = set(previous)
+
+        events: list[str] = []
+
+        for key in sorted(current_keys - previous_keys):
+            kind = "returned" if key in self.ever_seen else "new"
+            events.append(format_monitor_event(kind, current[key]))
+
+        for key in sorted(previous_keys - current_keys):
+            events.append(format_monitor_event("removed", None, previous[key]))
+
+        for key in sorted(current_keys & previous_keys):
+            old = previous[key]
+            new = current[key]
+            if old.get("price") != new.get("price") or old.get("currency") != new.get("currency"):
+                events.append(format_monitor_event("price", new, old))
+
+        self.ever_seen.update(current_keys)
+        self.previous = current
+
+        if not self.chat_id or not events:
+            return
+
+        for event in events[:20]:
+            try:
+                await application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=event,
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                print(f"Marketapp monitor Telegram error: {exc!r}", flush=True)
+
+    async def loop(self, application: Application) -> None:
+        self.running = True
+        print(f"Marketapp monitor started, interval={MONITOR_INTERVAL}s", flush=True)
+        try:
+            while self.running:
+                await self.poll(application)
+                await asyncio.sleep(MONITOR_INTERVAL)
+        except asyncio.CancelledError:
+            print("Marketapp monitor cancelled", flush=True)
+            raise
+        finally:
+            self.running = False
+
+    def start(self, application: Application) -> None:
+        if self.task and not self.task.done():
+            return
+        self.task = asyncio.create_task(self.loop(application))
+
+    async def stop(self) -> None:
+        self.running = False
+        if self.task and not self.task.done():
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+        self.task = None
+
+
+number_monitor = NumberMonitor()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -26,7 +127,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/help — показать помощь\n"
         "/marketapp — проверить запрос к Marketapp API\n"
         "/numbers — показать доступные для аренды номера\n"
-        "/history — посмотреть структуру истории аренды номеров\n\n"
+        "/history — посмотреть структуру истории аренды номеров\n"
+        "/monitor — включить мониторинг пула номеров в этом чате\n"
+        "/monitor_off — выключить мониторинг\n\n"
         "Просто напиши ситуацию или вопрос, и я подберу подходящую народную мудрость."
     )
 
@@ -34,7 +137,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def marketapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("Telegram /marketapp handler received an update", flush=True)
     await update.message.reply_text("Проверяю Marketapp API... 🔎")
-
     try:
         data = await get_collections()
         await update.message.reply_text(format_result(data))
@@ -46,11 +148,9 @@ async def marketapp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def numbers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("Telegram /numbers handler received an update", flush=True)
     await update.message.reply_text("Смотрю доступные номера в Marketapp... 📱🔎")
-
     try:
         data = await get_rent_numbers()
-        messages = format_numbers(data)
-        for message in messages:
+        for message in format_numbers(data):
             await update.message.reply_text(message, parse_mode="HTML")
     except Exception as exc:
         print(f"Marketapp /numbers error: {exc!r}", flush=True)
@@ -60,7 +160,6 @@ async def numbers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("Telegram /history handler received an update", flush=True)
     await update.message.reply_text("Запрашиваю историю аренды номеров в Marketapp... 🧾🔎")
-
     try:
         data = await get_numbers_history()
         for message in format_debug(data):
@@ -70,12 +169,37 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"Ошибка Marketapp API: {exc}")
 
 
+async def monitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /monitor handler received an update", flush=True)
+    if not update.effective_chat:
+        return
+
+    number_monitor.chat_id = update.effective_chat.id
+    number_monitor.start(context.application)
+
+    status = "уже был включён" if number_monitor.previous is not None else "включён"
+    await update.message.reply_text(
+        f"👀 Мониторинг Marketapp {status}.\n\n"
+        f"Проверяю пул каждые {MONITOR_INTERVAL} сек.\n"
+        "Буду сообщать о новых номерах, исчезновении, возвращении и изменении цены.\n\n"
+        "Первый запрос используется как базовый снимок, поэтому старые номера сразу не посыпятся уведомлениями."
+    )
+
+
+async def monitor_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /monitor_off handler received an update", flush=True)
+    if update.effective_chat and number_monitor.chat_id == update.effective_chat.id:
+        number_monitor.chat_id = None
+        await update.message.reply_text("🛑 Мониторинг уведомлений выключен.")
+    else:
+        await update.message.reply_text("Мониторинг для этого чата не был включён.")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"Telegram handler error: {context.error!r}", flush=True)
 
 
 def build_answer(query: str, matches: list[dict]) -> str:
-    """Build a useful response from the retrieved proverb evidence without inventing facts."""
     first = matches[0]
     proverb = first.get("proverb", "")
     meaning = first.get("meaning", "").strip()
@@ -99,14 +223,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     print("Telegram text message handler received an update", flush=True)
-
     query = update.message.text.strip()
     if len(query) < 3:
         await update.message.reply_text("Опиши ситуацию чуть подробнее 🙂")
         return
 
     matches = search_proverbs(query, limit=3)
-
     if not matches:
         await update.message.reply_text(
             "Пока не нашёл достаточно близкой пословицы в своей базе. 🧐\n\n"
@@ -131,6 +253,8 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("marketapp", marketapp_command))
     telegram_app.add_handler(CommandHandler("numbers", numbers_command))
     telegram_app.add_handler(CommandHandler("history", history_command))
+    telegram_app.add_handler(CommandHandler("monitor", monitor_command))
+    telegram_app.add_handler(CommandHandler("monitor_off", monitor_off_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(error_handler)
 
@@ -138,6 +262,7 @@ def create_app() -> web.Application:
         print("Telegram startup: initializing application", flush=True)
         await telegram_app.initialize()
         await telegram_app.start()
+        number_monitor.start(telegram_app)
         print("Telegram startup: application started, setting webhook", flush=True)
 
         await telegram_app.bot.set_webhook(
@@ -158,6 +283,7 @@ def create_app() -> web.Application:
 
     async def on_cleanup(app: web.Application) -> None:
         print("Telegram cleanup: stopping application without deleting webhook", flush=True)
+        await number_monitor.stop()
         await telegram_app.stop()
         await telegram_app.shutdown()
 
