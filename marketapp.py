@@ -8,6 +8,37 @@ import aiohttp
 
 BASE_URL = "https://api.marketapp.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
+SHEETS_WEBHOOK_URL = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
+SHEETS_SECRET = os.environ.get("GOOGLE_SHEETS_SECRET", "").strip()
+
+
+async def _post_sheets(payload: dict[str, Any]) -> None:
+    """Best-effort sync to the Google Sheets Apps Script webhook."""
+    if not SHEETS_WEBHOOK_URL or not SHEETS_SECRET:
+        return
+
+    body = dict(payload)
+    body["secret"] = SHEETS_SECRET
+    timeout = aiohttp.ClientTimeout(total=15)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                SHEETS_WEBHOOK_URL,
+                json=body,
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                text = await response.text()
+                if response.status >= 400:
+                    print(
+                        f"Google Sheets sync HTTP {response.status}: {text[:500]}",
+                        flush=True,
+                    )
+                else:
+                    print("Google Sheets sync: OK", flush=True)
+    except Exception as exc:
+        # Sheets must never break the Marketapp monitor itself.
+        print(f"Google Sheets sync ERROR: {exc!r}", flush=True)
 
 
 async def _get(endpoint: str) -> Any:
@@ -36,11 +67,15 @@ async def get_collections() -> Any:
 
 
 async def get_rent_numbers() -> Any:
-    return await _get("/v1/rent/numbers/")
+    data = await _get("/v1/rent/numbers/")
+    await _post_sheets({"type": "pool", "data": data})
+    return data
 
 
 async def get_numbers_history() -> Any:
-    return await _get("/v1/rent/numbers/history/")
+    data = await _get("/v1/rent/numbers/history/")
+    await _post_sheets({"type": "history", "data": data})
+    return data
 
 
 def _format_value(value: Any) -> str:
