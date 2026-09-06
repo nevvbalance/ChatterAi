@@ -10,16 +10,20 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from data.proverb_loader import search_proverbs
 from marketapp import (
     build_number_snapshot,
+    extract_history_items,
     format_debug,
+    format_history_monitor_event,
     format_monitor_event,
     format_numbers,
     format_result,
     get_collections,
     get_numbers_history,
     get_rent_numbers,
+    history_event_key,
 )
 
 MONITOR_INTERVAL = int(os.environ.get("MARKETAPP_MONITOR_INTERVAL", "90"))
+HISTORY_LOOKBACK = int(os.environ.get("MARKETAPP_HISTORY_LOOKBACK", "100"))
 
 
 class NumberMonitor:
@@ -27,9 +31,51 @@ class NumberMonitor:
         self.chat_id: int | None = None
         self.previous: dict[str, dict] | None = None
         self.ever_seen: set[str] = set()
+        self.history_seen: set[str] = set()
         self.task: asyncio.Task | None = None
         self.running = False
         self.cycle = 0
+
+    async def poll_history(self, application: Application) -> list[str]:
+        """Poll recent rent events so short-lived rentals are not missed."""
+        try:
+            data = await get_numbers_history()
+            history = extract_history_items(data)
+        except Exception as exc:
+            print(f"Marketapp history poll ERROR: {exc!r}", flush=True)
+            return []
+
+        # Keep a bounded recent-event set. The API returns the newest events first.
+        history = history[:HISTORY_LOOKBACK]
+        current_ids = [history_event_key(item) for item in history]
+
+        if not self.history_seen:
+            self.history_seen.update(current_ids)
+            print(
+                f"Marketapp history baseline: {len(history)} recent event(s)",
+                flush=True,
+            )
+            return []
+
+        new_items: list[dict] = []
+        for item, event_id in zip(history, current_ids):
+            if event_id not in self.history_seen:
+                new_items.append(item)
+
+        self.history_seen.update(current_ids)
+
+        # Avoid unbounded memory growth while retaining enough recent IDs to
+        # deduplicate events returned by the API on subsequent polls.
+        if len(self.history_seen) > HISTORY_LOOKBACK * 3:
+            self.history_seen = set(current_ids)
+
+        if new_items:
+            print(
+                f"Marketapp history poll: detected {len(new_items)} new rent event(s)",
+                flush=True,
+            )
+
+        return [format_history_monitor_event(item) for item in reversed(new_items)]
 
     async def poll(self, application: Application) -> None:
         self.cycle += 1
@@ -38,6 +84,8 @@ class NumberMonitor:
             f"Marketapp monitor poll #{self.cycle}: checking pool...",
             flush=True,
         )
+
+        history_events = await self.poll_history(application)
 
         try:
             data = await get_rent_numbers()
@@ -63,44 +111,45 @@ class NumberMonitor:
                 f"Marketapp monitor baseline: {len(current)} numbers",
                 flush=True,
             )
-            return
-
-        previous = self.previous
-        current_keys = set(current)
-        previous_keys = set(previous)
-        events: list[str] = []
-
-        for key in sorted(current_keys - previous_keys):
-            kind = "returned" if key in self.ever_seen else "new"
-            events.append(format_monitor_event(kind, current[key]))
-
-        for key in sorted(previous_keys - current_keys):
-            events.append(format_monitor_event("removed", None, previous[key]))
-
-        for key in sorted(current_keys & previous_keys):
-            old = previous[key]
-            new = current[key]
-            if old.get("price") != new.get("price") or old.get("currency") != new.get("currency"):
-                events.append(format_monitor_event("price", new, old))
-
-        self.ever_seen.update(current_keys)
-        self.previous = current
-
-        if events:
-            print(
-                f"Marketapp monitor poll #{self.cycle}: detected {len(events)} event(s)",
-                flush=True,
-            )
         else:
-            print(
-                f"Marketapp monitor poll #{self.cycle}: no changes",
-                flush=True,
-            )
+            previous = self.previous
+            current_keys = set(current)
+            previous_keys = set(previous)
+            events: list[str] = []
 
-        if not self.chat_id or not events:
+            for key in sorted(current_keys - previous_keys):
+                kind = "returned" if key in self.ever_seen else "new"
+                events.append(format_monitor_event(kind, current[key]))
+
+            for key in sorted(previous_keys - current_keys):
+                events.append(format_monitor_event("removed", None, previous[key]))
+
+            for key in sorted(current_keys & previous_keys):
+                old = previous[key]
+                new = current[key]
+                if old.get("price") != new.get("price") or old.get("currency") != new.get("currency"):
+                    events.append(format_monitor_event("price", new, old))
+
+            self.ever_seen.update(current_keys)
+            self.previous = current
+
+            if events:
+                print(
+                    f"Marketapp monitor poll #{self.cycle}: detected {len(events)} pool event(s)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Marketapp monitor poll #{self.cycle}: no pool changes",
+                    flush=True,
+                )
+
+            history_events.extend(events)
+
+        if not self.chat_id or not history_events:
             return
 
-        for event in events[:20]:
+        for event in history_events[:20]:
             try:
                 await application.bot.send_message(
                     chat_id=self.chat_id,
@@ -221,8 +270,9 @@ async def monitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(
         f"👀 Мониторинг Marketapp {status}.\n\n"
         f"Проверяю пул каждые {MONITOR_INTERVAL} сек.\n"
-        "Буду сообщать о новых номерах, исчезновении, возвращении и изменении цены.\n\n"
-        "Первый запрос используется как базовый снимок, поэтому старые номера сразу не посыпятся уведомлениями."
+        "Дополнительно проверяю историю аренд, чтобы не пропускать короткие аренды между проверками.\n"
+        "Буду сообщать о новых номерах, исчезновении, возвращении, изменении цены и факте аренды.\n\n"
+        "Первый запрос используется как базовый снимок, поэтому старые события сразу не посыпятся уведомлениями."
     )
 
 
