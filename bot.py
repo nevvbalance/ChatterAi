@@ -35,22 +35,39 @@ class NumberMonitor:
         self.task: asyncio.Task | None = None
         self.running = False
         self.cycle = 0
+        self.last_poll_at: float | None = None
+        self.last_pool_count = 0
+        self.last_history_count = 0
+        self.last_history_new = 0
+        self.last_pool_events = 0
+        self.last_error: str | None = None
 
     async def poll_history(self, application: Application) -> list[str]:
         """Poll recent rent events so short-lived rentals are not missed."""
         try:
+            print(
+                f"Marketapp history poll #{self.cycle}: requesting history...",
+                flush=True,
+            )
             data = await get_numbers_history()
             history = extract_history_items(data)
+            self.last_error = None
         except Exception as exc:
+            self.last_error = f"history: {exc!r}"
             print(f"Marketapp history poll ERROR: {exc!r}", flush=True)
             return []
 
-        # Keep a bounded recent-event set. The API returns the newest events first.
         history = history[:HISTORY_LOOKBACK]
+        self.last_history_count = len(history)
         current_ids = [history_event_key(item) for item in history]
+        print(
+            f"Marketapp history poll #{self.cycle}: received {len(history)} event(s)",
+            flush=True,
+        )
 
         if not self.history_seen:
             self.history_seen.update(current_ids)
+            self.last_history_new = 0
             print(
                 f"Marketapp history baseline: {len(history)} recent event(s)",
                 flush=True,
@@ -63,40 +80,74 @@ class NumberMonitor:
                 new_items.append(item)
 
         self.history_seen.update(current_ids)
+        self.last_history_new = len(new_items)
 
-        # Avoid unbounded memory growth while retaining enough recent IDs to
-        # deduplicate events returned by the API on subsequent polls.
         if len(self.history_seen) > HISTORY_LOOKBACK * 3:
             self.history_seen = set(current_ids)
 
         if new_items:
             print(
-                f"Marketapp history poll: detected {len(new_items)} new rent event(s)",
+                f"Marketapp history poll #{self.cycle}: detected {len(new_items)} new rent event(s)",
+                flush=True,
+            )
+        else:
+            print(
+                f"Marketapp history poll #{self.cycle}: no new rent events",
                 flush=True,
             )
 
         return [format_history_monitor_event(item) for item in reversed(new_items)]
 
+    async def send_events(self, application: Application, events: list[str]) -> None:
+        if not self.chat_id:
+            print("Marketapp monitor: cannot send events, chat_id is not set", flush=True)
+            return
+
+        for event in events[:20]:
+            try:
+                await application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=event,
+                    parse_mode="HTML",
+                )
+                print(
+                    f"Marketapp monitor: Telegram notification sent to chat {self.chat_id}",
+                    flush=True,
+                )
+            except Exception as exc:
+                self.last_error = f"telegram: {exc!r}"
+                print(f"Marketapp monitor Telegram error: {exc!r}", flush=True)
+
     async def poll(self, application: Application) -> None:
         self.cycle += 1
+        self.last_poll_at = time.time()
         cycle_started = time.monotonic()
+        self.last_pool_events = 0
         print(
             f"Marketapp monitor poll #{self.cycle}: checking pool...",
             flush=True,
         )
 
+        # History is independent from the pool snapshot. Keep its events even
+        # when the pool endpoint fails, so a transient pool error cannot swallow
+        # a real rent notification.
         history_events = await self.poll_history(application)
 
+        pool_events: list[str] = []
         try:
             data = await get_rent_numbers()
             current = build_number_snapshot(data)
+            self.last_error = None
         except Exception as exc:
+            self.last_error = f"pool: {exc!r}"
             print(
-                f"Marketapp monitor poll #{self.cycle}: ERROR {exc!r}",
+                f"Marketapp monitor poll #{self.cycle}: pool ERROR {exc!r}",
                 flush=True,
             )
+            await self.send_events(application, history_events)
             return
 
+        self.last_pool_count = len(current)
         elapsed = time.monotonic() - cycle_started
         print(
             f"Marketapp monitor poll #{self.cycle}: received {len(current)} numbers "
@@ -115,27 +166,27 @@ class NumberMonitor:
             previous = self.previous
             current_keys = set(current)
             previous_keys = set(previous)
-            events: list[str] = []
 
             for key in sorted(current_keys - previous_keys):
                 kind = "returned" if key in self.ever_seen else "new"
-                events.append(format_monitor_event(kind, current[key]))
+                pool_events.append(format_monitor_event(kind, current[key]))
 
             for key in sorted(previous_keys - current_keys):
-                events.append(format_monitor_event("removed", None, previous[key]))
+                pool_events.append(format_monitor_event("removed", None, previous[key]))
 
             for key in sorted(current_keys & previous_keys):
                 old = previous[key]
                 new = current[key]
                 if old.get("price") != new.get("price") or old.get("currency") != new.get("currency"):
-                    events.append(format_monitor_event("price", new, old))
+                    pool_events.append(format_monitor_event("price", new, old))
 
             self.ever_seen.update(current_keys)
             self.previous = current
 
-            if events:
+            self.last_pool_events = len(pool_events)
+            if pool_events:
                 print(
-                    f"Marketapp monitor poll #{self.cycle}: detected {len(events)} pool event(s)",
+                    f"Marketapp monitor poll #{self.cycle}: detected {len(pool_events)} pool event(s)",
                     flush=True,
                 )
             else:
@@ -144,24 +195,32 @@ class NumberMonitor:
                     flush=True,
                 )
 
-            history_events.extend(events)
-
-        if not self.chat_id or not history_events:
-            return
-
-        for event in history_events[:20]:
-            try:
-                await application.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=event,
-                    parse_mode="HTML",
-                )
-            except Exception as exc:
-                print(f"Marketapp monitor Telegram error: {exc!r}", flush=True)
+        all_events = history_events + pool_events
+        if all_events:
+            print(
+                f"Marketapp monitor poll #{self.cycle}: sending {len(all_events)} notification(s)",
+                flush=True,
+            )
+            await self.send_events(application, all_events)
 
     async def loop(self, application: Application) -> None:
         self.running = True
         print(f"Marketapp monitor started, interval={MONITOR_INTERVAL}s", flush=True)
+        if self.chat_id:
+            try:
+                await application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="🟢 <b>Marketapp монитор реально запущен</b>\nФоновая задача работает. Сейчас выполняю первый цикл проверки.",
+                    parse_mode="HTML",
+                )
+                print(
+                    f"Marketapp monitor startup notification sent to chat {self.chat_id}",
+                    flush=True,
+                )
+            except Exception as exc:
+                self.last_error = f"startup telegram: {exc!r}"
+                print(f"Marketapp monitor startup Telegram error: {exc!r}", flush=True)
+
         try:
             while self.running:
                 await self.poll(application)
@@ -174,6 +233,7 @@ class NumberMonitor:
             print("Marketapp monitor cancelled", flush=True)
             raise
         except Exception as exc:
+            self.last_error = f"loop: {exc!r}"
             print(f"Marketapp monitor loop CRASHED: {exc!r}", flush=True)
             raise
         finally:
@@ -182,8 +242,10 @@ class NumberMonitor:
 
     def start(self, application: Application) -> None:
         if self.task and not self.task.done():
+            print("Marketapp monitor start requested, but task is already running", flush=True)
             return
         self.task = asyncio.create_task(self.loop(application))
+        print(f"Marketapp monitor task created: {self.task!r}", flush=True)
 
     async def stop(self) -> None:
         self.running = False
@@ -194,6 +256,33 @@ class NumberMonitor:
             except asyncio.CancelledError:
                 pass
         self.task = None
+
+    def status_text(self) -> str:
+        task_state = "нет задачи"
+        if self.task:
+            if self.task.done():
+                task_state = "завершена"
+            else:
+                task_state = "жива"
+
+        last_poll = "ещё не было"
+        if self.last_poll_at:
+            last_poll = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(self.last_poll_at))
+
+        error = self.last_error or "нет"
+        return (
+            "📊 <b>Статус Marketapp монитора</b>\n\n"
+            f"🟢 running: <b>{self.running}</b>\n"
+            f"⚙️ task: <b>{task_state}</b>\n"
+            f"🔄 цикл: <b>{self.cycle}</b>\n"
+            f"🕒 последний опрос: <b>{last_poll}</b>\n"
+            f"📱 номеров в пуле: <b>{self.last_pool_count}</b>\n"
+            f"🧾 событий истории: <b>{self.last_history_count}</b>\n"
+            f"🔴 новых аренд в последнем цикле: <b>{self.last_history_new}</b>\n"
+            f"📦 изменений пула в последнем цикле: <b>{self.last_pool_events}</b>\n"
+            f"💬 chat_id: <code>{self.chat_id}</code>\n"
+            f"⚠️ последняя ошибка: <code>{error}</code>"
+        )
 
 
 number_monitor = NumberMonitor()
@@ -218,6 +307,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/numbers — показать доступные для аренды номера\n"
         "/history — посмотреть структуру истории аренды номеров\n"
         "/monitor — включить мониторинг пула номеров в этом чате\n"
+        "/monitor_status — показать состояние монитора\n"
+        "/monitor_test — проверить отправку уведомлений\n"
         "/monitor_off — выключить мониторинг\n\n"
         "Просто напиши ситуацию или вопрос, и я подберу подходящую народную мудрость."
     )
@@ -272,7 +363,27 @@ async def monitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Проверяю пул каждые {MONITOR_INTERVAL} сек.\n"
         "Дополнительно проверяю историю аренд, чтобы не пропускать короткие аренды между проверками.\n"
         "Буду сообщать о новых номерах, исчезновении, возвращении, изменении цены и факте аренды.\n\n"
-        "Первый запрос используется как базовый снимок, поэтому старые события сразу не посыпятся уведомлениями."
+        "Первый запрос используется как базовый снимок, поэтому старые события сразу не посыпятся уведомлениями.\n\n"
+        "После запуска пришлю отдельное 🟢 подтверждение, что фоновая задача действительно стартовала."
+    )
+
+
+async def monitor_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /monitor_status handler received an update", flush=True)
+    await update.message.reply_text(number_monitor.status_text(), parse_mode="HTML")
+
+
+async def monitor_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /monitor_test handler received an update", flush=True)
+    if not update.effective_chat:
+        return
+
+    await update.message.reply_text("🧪 Отправляю тестовое уведомление через тот же канал, что использует монитор...")
+    number_monitor.chat_id = update.effective_chat.id
+    await number_monitor.send_events(
+        context.application,
+        ["🧪 <b>Тест монитора Marketapp</b>\nЕсли ты видишь это сообщение, Telegram-доставка уведомлений работает. "
+         "Теперь проверяем именно обнаружение аренд."]
     )
 
 
@@ -345,6 +456,8 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("numbers", numbers_command))
     telegram_app.add_handler(CommandHandler("history", history_command))
     telegram_app.add_handler(CommandHandler("monitor", monitor_command))
+    telegram_app.add_handler(CommandHandler("monitor_status", monitor_status_command))
+    telegram_app.add_handler(CommandHandler("monitor_test", monitor_test_command))
     telegram_app.add_handler(CommandHandler("monitor_off", monitor_off_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(error_handler)
