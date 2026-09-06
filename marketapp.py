@@ -37,17 +37,10 @@ async def _post_sheets(payload: dict[str, Any]) -> None:
             ) as response:
                 text = await response.text()
                 if response.status >= 400:
-                    print(
-                        f"Google Sheets sync HTTP {response.status}: {text[:500]}",
-                        flush=True,
-                    )
+                    print(f"Google Sheets sync HTTP {response.status}: {text[:500]}", flush=True)
                 else:
-                    print(
-                        f"Google Sheets sync: HTTP {response.status}, response={text[:500]}",
-                        flush=True,
-                    )
+                    print(f"Google Sheets sync: HTTP {response.status}, response={text[:500]}", flush=True)
     except Exception as exc:
-        # Sheets must never break the Marketapp monitor itself.
         print(f"Google Sheets sync ERROR: {exc!r}", flush=True)
 
 
@@ -65,13 +58,15 @@ async def _sync_pool_to_sheets(data: Any) -> None:
             if not isinstance(item, dict):
                 continue
             price, currency = number_price(item)
+            address = str(item.get("address") or item.get("nft_address") or "")
             await _post_sheets({
                 "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
                 "number": number_name(item),
                 "event": "pool_snapshot",
                 "price": price,
                 "currency": currency,
-                "duration": item.get("min_duration") or item.get("max_duration"),
+                "duration": format_sheet_duration(item.get("min_duration") or item.get("max_duration")),
+                "address": address,
                 "tx_hash": "",
                 "source": "Marketapp pool",
             })
@@ -90,7 +85,8 @@ async def _sync_pool_to_sheets(data: Any) -> None:
             "event": "returned" if key in _sheets_ever_seen else "new",
             "price": item.get("price"),
             "currency": item.get("currency", ""),
-            "duration": None,
+            "duration": "",
+            "address": item.get("address", ""),
             "tx_hash": "",
             "source": "Marketapp pool",
         })
@@ -103,7 +99,8 @@ async def _sync_pool_to_sheets(data: Any) -> None:
             "event": "removed",
             "price": item.get("price"),
             "currency": item.get("currency", ""),
-            "duration": None,
+            "duration": "",
+            "address": item.get("address", ""),
             "tx_hash": "",
             "source": "Marketapp pool",
         })
@@ -118,7 +115,8 @@ async def _sync_pool_to_sheets(data: Any) -> None:
                 "event": "price_change",
                 "price": new.get("price"),
                 "currency": new.get("currency", ""),
-                "duration": None,
+                "duration": "",
+                "address": new.get("address", ""),
                 "tx_hash": "",
                 "source": "Marketapp pool",
             })
@@ -150,10 +148,7 @@ async def _sync_history_to_sheets(data: Any) -> None:
 
     _sheets_history_seen.update(current_ids)
     for item in reversed(new_items):
-        await _post_history_item_to_sheets(
-            item,
-            "rent_extended" if item.get("is_extend") else "rent",
-        )
+        await _post_history_item_to_sheets(item, "rent_extended" if item.get("is_extend") else "rent")
 
     if new_items:
         print(f"Google Sheets history synced: {len(new_items)} new event(s)", flush=True)
@@ -168,11 +163,12 @@ async def _post_history_item_to_sheets(item: dict[str, Any], event: str) -> None
 
     await _post_sheets({
         "time": formatted_time,
-        "number": item.get("name") or item.get("address") or "",
+        "number": item.get("name") or item.get("number") or item.get("address") or "",
         "event": event,
-        "price": item.get("price"),
-        "currency": item.get("currency") or "",
-        "duration": item.get("duration"),
+        "price": item.get("price") or item.get("price_nano"),
+        "currency": item.get("currency") or ("TON" if item.get("price_nano") is not None else ""),
+        "duration": format_sheet_duration(item.get("duration")),
+        "address": item.get("address") or "",
         "tx_hash": item.get("tx_hash") or "",
         "source": "Marketapp history",
     })
@@ -192,7 +188,6 @@ async def _get(endpoint: str) -> Any:
             text = await response.text()
             if response.status >= 400:
                 raise RuntimeError(f"Marketapp API HTTP {response.status}: {text[:500]}")
-
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
@@ -226,14 +221,11 @@ def _format_value(value: Any) -> str:
 def format_result(data: Any) -> str:
     if isinstance(data, list):
         return f"Marketapp API ответил успешно. Получено объектов: {len(data)}"
-
     if isinstance(data, dict):
         if not data:
             return "Marketapp API ответил успешно, но вернул пустой объект."
-
         parts = [f"{key}: {_format_value(value)}" for key, value in list(data.items())[:8]]
         return "Marketapp API ответил успешно:\n\n" + "\n".join(parts)
-
     return f"Marketapp API ответил успешно:\n\n{str(data)[:1500]}"
 
 
@@ -242,7 +234,6 @@ def format_debug(data: Any) -> list[str]:
         raw = data
     else:
         raw = json.dumps(data, ensure_ascii=False, indent=2, default=str)
-
     chunks: list[str] = []
     for start in range(0, len(raw), TELEGRAM_MESSAGE_LIMIT):
         chunks.append(raw[start:start + TELEGRAM_MESSAGE_LIMIT])
@@ -254,7 +245,6 @@ def _format_duration(seconds: Any) -> str:
         total = int(seconds)
     except (TypeError, ValueError):
         return str(seconds)
-
     days = total // 86400
     if days == 0:
         hours = total // 3600
@@ -266,6 +256,19 @@ def _format_duration(seconds: Any) -> str:
     return f"{days} дней"
 
 
+def format_sheet_duration(seconds: Any) -> Any:
+    if seconds is None or seconds == "":
+        return ""
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return str(seconds)
+    days = total / 86400
+    if days.is_integer():
+        return f"{int(days)} дн."
+    return f"{days:.1f} дн."
+
+
 def _short_address(address: Any) -> str:
     if not isinstance(address, str) or len(address) < 12:
         return str(address)
@@ -273,64 +276,60 @@ def _short_address(address: Any) -> str:
 
 
 def _extract_items(data: Any) -> tuple[list[Any], bool]:
-    """Extract an API item list from common response shapes."""
     if isinstance(data, list):
         return data, True
     if not isinstance(data, dict):
         return [], False
-
     for key in ("items", "results", "data", "nfts", "numbers"):
         value = data.get(key)
         if isinstance(value, list):
             return value, False
-
     for value in data.values():
         if isinstance(value, list):
             return value, False
-
     return [], False
 
 
 def number_key(item: Any) -> str:
-    """Return a stable identifier for an available number."""
     if not isinstance(item, dict):
         return str(item)
-    return str(
-        item.get("address")
-        or item.get("nft_address")
-        or item.get("id")
-        or item.get("name")
-        or item.get("number")
-        or "unknown"
-    )
+    return str(item.get("address") or item.get("nft_address") or item.get("id") or item.get("number") or item.get("phone_number") or item.get("name") or "unknown")
 
 
 def number_name(item: Any) -> str:
     if not isinstance(item, dict):
         return str(item)
-    return str(item.get("name") or item.get("nft_name") or item.get("number") or number_key(item))
+    return str(item.get("number") or item.get("phone_number") or item.get("name") or item.get("nft_name") or number_key(item))
 
 
 def number_price(item: Any) -> tuple[Any, str]:
     if not isinstance(item, dict):
         return None, ""
-    for key in ("price", "rent_price", "price_ton", "price_gram"):
-        if item.get(key) is not None:
-            return item.get(key), str(item.get("currency") or ("GRAM" if key == "price_gram" else "TON"))
+
+    for key in ("price", "rent_price", "price_ton", "price_gram", "amount", "cost"):
+        value = item.get(key)
+        if value is not None and value != "":
+            return value, str(item.get("currency") or ("GRAM" if key == "price_gram" else "TON"))
+
+    nano = item.get("price_nano")
+    if nano is not None and nano != "":
+        try:
+            return float(nano) / 1_000_000_000, str(item.get("currency") or "TON")
+        except (TypeError, ValueError):
+            return nano, str(item.get("currency") or "TON")
+
     return None, str(item.get("currency") or "")
 
 
 def _format_number_item(index: int, item: Any) -> str:
     if not isinstance(item, dict):
         return f"<b>{index}. 📱 {html.escape(str(item))}</b>"
-
     number = html.escape(number_name(item))
     min_duration = item.get("min_duration")
     max_duration = item.get("max_duration")
     owner = item.get("owner")
     nft_address = item.get("nft_address") or item.get("address")
     price, currency = number_price(item)
-
     if min_duration is not None and max_duration is not None:
         duration = f"{_format_duration(min_duration)} → {_format_duration(max_duration)}"
     elif min_duration is not None:
@@ -339,18 +338,15 @@ def _format_number_item(index: int, item: Any) -> str:
         duration = f"до {_format_duration(max_duration)}"
     else:
         duration = "срок не указан"
-
     lines = [f"<b>{index}. 📱 {number}</b>"]
     if price is not None:
         suffix = f" {html.escape(currency)}" if currency else ""
         lines.append(f"   💰 Цена: <b>{html.escape(str(price))}{suffix}</b>")
     lines.append(f"   ⏱ {duration}")
-
     if owner:
         lines.append(f"   👤 <code>{html.escape(_short_address(owner))}</code>")
     if nft_address:
         lines.append(f"   🔗 <code>{html.escape(_short_address(nft_address))}</code>")
-
     return "\n".join(lines)
 
 
@@ -358,11 +354,9 @@ def format_numbers(data: Any) -> list[str]:
     items, _ = _extract_items(data)
     if not items:
         return [format_result(data)]
-
     header = f"📱 <b>Доступно номеров: {len(items)}</b>\n━━━━━━━━━━━━━━━━━━━━"
     chunks: list[str] = []
     current = header
-
     for index, item in enumerate(items, 1):
         entry = _format_number_item(index, item)
         candidate = f"{current}\n\n{entry}"
@@ -371,14 +365,12 @@ def format_numbers(data: Any) -> list[str]:
             current = entry
         else:
             current = candidate
-
     if current:
         chunks.append(current)
     return chunks
 
 
 def build_number_snapshot(data: Any) -> dict[str, dict[str, Any]]:
-    """Build a stable snapshot of the currently available number pool."""
     items, _ = _extract_items(data)
     snapshot: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -386,58 +378,47 @@ def build_number_snapshot(data: Any) -> dict[str, dict[str, Any]]:
         if key == "unknown":
             continue
         price, currency = number_price(item)
+        address = str(item.get("address") or item.get("nft_address") or "") if isinstance(item, dict) else ""
         snapshot[key] = {
             "name": number_name(item),
             "price": str(price) if price is not None else None,
             "currency": currency,
+            "address": address,
             "item": item,
         }
     return snapshot
 
 
 def extract_history_items(data: Any) -> list[dict[str, Any]]:
-    """Extract rent-history events from the API response."""
     items, _ = _extract_items(data)
     return [item for item in items if isinstance(item, dict)]
 
 
 def history_event_key(item: dict[str, Any]) -> str:
-    """Return a stable id for a rent-history event."""
     for key in ("tx_hash", "id", "event_id"):
         value = item.get(key)
         if value:
             return str(value)
-    return "|".join(
-        str(item.get(key, ""))
-        for key in ("address", "ts", "src", "dst", "price", "duration", "is_extend")
-    )
+    return "|".join(str(item.get(key, "")) for key in ("address", "ts", "src", "dst", "price", "duration", "is_extend"))
 
 
 def format_history_monitor_event(item: dict[str, Any]) -> str:
-    """Format a rent-history event that was not present in the previous poll."""
-    name = html.escape(str(item.get("name") or item.get("address") or "номер"))
+    name = html.escape(str(item.get("name") or item.get("number") or item.get("address") or "номер"))
     price = item.get("price")
     currency = html.escape(str(item.get("currency") or ""))
     price_text = f"\n💰 Цена: <b>{html.escape(str(price))} {currency}</b>" if price is not None else ""
     duration = item.get("duration")
     duration_text = f"\n⏱ Срок: {_format_duration(duration)}" if duration is not None else ""
-
-    if item.get("is_extend"):
-        title = "🟡 <b>Аренда номера продлена</b>"
-    else:
-        title = "🔴 <b>Номер арендован</b>"
-
+    title = "🟡 <b>Аренда номера продлена</b>" if item.get("is_extend") else "🔴 <b>Номер арендован</b>"
     return f"{title}\n📱 {name}{price_text}{duration_text}"
 
 
 def format_monitor_event(kind: str, current: dict[str, Any] | None, previous: dict[str, Any] | None = None) -> str:
-    """Format a single pool-change event for Telegram."""
     item = current or previous or {}
     name = html.escape(str(item.get("name") or "номер"))
     price = item.get("price")
     currency = html.escape(str(item.get("currency") or ""))
     price_text = f"\n💰 Цена: <b>{html.escape(str(price))} {currency}</b>" if price is not None else ""
-
     if kind == "new":
         return f"🟢 <b>Новый номер в пуле</b>\n📱 {name}{price_text}"
     if kind == "removed":
@@ -447,9 +428,5 @@ def format_monitor_event(kind: str, current: dict[str, Any] | None, previous: di
     if kind == "price":
         old_price = previous.get("price") if previous else None
         old_currency = previous.get("currency") if previous else ""
-        return (
-            f"🟡 <b>Изменилась цена</b>\n📱 {name}\n"
-            f"Было: <b>{html.escape(str(old_price))} {html.escape(str(old_currency))}</b>\n"
-            f"Стало: <b>{html.escape(str(price))} {currency}</b>"
-        )
+        return f"🟡 <b>Изменилась цена</b>\n📱 {name}\nБыло: <b>{html.escape(str(old_price))} {html.escape(str(old_currency))}</b>\nСтало: <b>{html.escape(str(price))} {currency}</b>"
     return f"ℹ️ <b>Изменение номера</b>\n📱 {name}{price_text}"
