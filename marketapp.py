@@ -223,6 +223,41 @@ def build_number_snapshot(data: Any) -> dict[str, dict[str, Any]]:
     return snapshot
 
 
+def extract_history_items(data: Any) -> list[dict[str, Any]]:
+    """Extract rent-history events from the API response."""
+    items, _ = _extract_items(data)
+    return [item for item in items if isinstance(item, dict)]
+
+
+def history_event_key(item: dict[str, Any]) -> str:
+    """Return a stable id for a rent-history event."""
+    for key in ("tx_hash", "id", "event_id"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return "|".join(
+        str(item.get(key, ""))
+        for key in ("address", "ts", "src", "dst", "price", "duration", "is_extend")
+    )
+
+
+def format_history_monitor_event(item: dict[str, Any]) -> str:
+    """Format a rent-history event that was not present in the previous poll."""
+    name = html.escape(str(item.get("name") or item.get("address") or "номер"))
+    price = item.get("price")
+    currency = html.escape(str(item.get("currency") or ""))
+    price_text = f"\n💰 Цена: <b>{html.escape(str(price))} {currency}</b>" if price is not None else ""
+    duration = item.get("duration")
+    duration_text = f"\n⏱ Срок: {_format_duration(duration)}" if duration is not None else ""
+
+    if item.get("is_extend"):
+        title = "🟡 <b>Аренда номера продлена</b>"
+    else:
+        title = "🔴 <b>Номер арендован</b>"
+
+    return f"{title}\n📱 {name}{price_text}{duration_text}"
+
+
 def format_monitor_event(kind: str, current: dict[str, Any] | None, previous: dict[str, Any] | None = None) -> str:
     """Format a single pool-change event for Telegram."""
     item = current or previous or {}
