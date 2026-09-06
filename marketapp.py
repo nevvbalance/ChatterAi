@@ -42,9 +42,6 @@ async def _post_sheets(payload: dict[str, Any]) -> None:
                         flush=True,
                     )
                 else:
-                    # Apps Script can return HTTP 200 even when doPost() reports
-                    # an application-level error. Log the response body so the
-                    # Render logs reveal the real webhook result.
                     print(
                         f"Google Sheets sync: HTTP {response.status}, response={text[:500]}",
                         flush=True,
@@ -424,7 +421,35 @@ def format_history_monitor_event(item: dict[str, Any]) -> str:
     price_text = f"\n💰 Цена: <b>{html.escape(str(price))} {currency}</b>" if price is not None else ""
     duration = item.get("duration")
     duration_text = f"\n⏱ Срок: {_format_duration(duration)}" if duration is not None else ""
-    event_text = "Продление аренды" if item.get("is_extend") else "Аренда номера"
-    tx_hash = html.escape(str(item.get("tx_hash") or ""))
-    tx_text = f"\n🔗 TX: <code>{tx_hash}</code>" if tx_hash else ""
-    return f"📱 <b>{event_text}</b>\nНомер: <b>{name}</b>{price_text}{duration_text}{tx_text}"
+
+    if item.get("is_extend"):
+        title = "🟡 <b>Аренда номера продлена</b>"
+    else:
+        title = "🔴 <b>Номер арендован</b>"
+
+    return f"{title}\n📱 {name}{price_text}{duration_text}"
+
+
+def format_monitor_event(kind: str, current: dict[str, Any] | None, previous: dict[str, Any] | None = None) -> str:
+    """Format a single pool-change event for Telegram."""
+    item = current or previous or {}
+    name = html.escape(str(item.get("name") or "номер"))
+    price = item.get("price")
+    currency = html.escape(str(item.get("currency") or ""))
+    price_text = f"\n💰 Цена: <b>{html.escape(str(price))} {currency}</b>" if price is not None else ""
+
+    if kind == "new":
+        return f"🟢 <b>Новый номер в пуле</b>\n📱 {name}{price_text}"
+    if kind == "removed":
+        return f"🔴 <b>Номер исчез из пула</b>\n📱 {name}\nВозможная причина: аренда или снятие с аренды.{price_text}"
+    if kind == "returned":
+        return f"🔵 <b>Номер вернулся в пул</b>\n📱 {name}{price_text}"
+    if kind == "price":
+        old_price = previous.get("price") if previous else None
+        old_currency = previous.get("currency") if previous else ""
+        return (
+            f"🟡 <b>Изменилась цена</b>\n📱 {name}\n"
+            f"Было: <b>{html.escape(str(old_price))} {html.escape(str(old_currency))}</b>\n"
+            f"Стало: <b>{html.escape(str(price))} {currency}</b>"
+        )
+    return f"ℹ️ <b>Изменение номера</b>\n📱 {name}{price_text}"
