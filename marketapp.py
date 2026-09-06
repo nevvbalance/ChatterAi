@@ -1,6 +1,7 @@
 import html
 import json
 import os
+import time
 from typing import Any
 
 import aiohttp
@@ -11,10 +12,16 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 SHEETS_WEBHOOK_URL = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
 SHEETS_SECRET = os.environ.get("GOOGLE_SHEETS_SECRET", "").strip()
 
+_sheets_pool_previous: dict[str, dict[str, Any]] | None = None
+_sheets_ever_seen: set[str] = set()
+_sheets_history_seen: set[str] = set()
+_sheets_history_initialized = False
+
 
 async def _post_sheets(payload: dict[str, Any]) -> None:
     """Best-effort sync to the Google Sheets Apps Script webhook."""
     if not SHEETS_WEBHOOK_URL or not SHEETS_SECRET:
+        print("Google Sheets sync: disabled, webhook/secret is missing", flush=True)
         return
 
     body = dict(payload)
@@ -39,6 +46,133 @@ async def _post_sheets(payload: dict[str, Any]) -> None:
     except Exception as exc:
         # Sheets must never break the Marketapp monitor itself.
         print(f"Google Sheets sync ERROR: {exc!r}", flush=True)
+
+
+async def _sync_pool_to_sheets(data: Any) -> None:
+    """Send only meaningful pool changes, with a first-run snapshot."""
+    global _sheets_pool_previous
+
+    items, _ = _extract_items(data)
+    current = build_number_snapshot(data)
+
+    if _sheets_pool_previous is None:
+        _sheets_pool_previous = current
+        _sheets_ever_seen.update(current)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            price, currency = number_price(item)
+            await _post_sheets({
+                "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+                "number": number_name(item),
+                "event": "pool_snapshot",
+                "price": price,
+                "currency": currency,
+                "duration": item.get("min_duration") or item.get("max_duration"),
+                "tx_hash": "",
+                "source": "Marketapp pool",
+            })
+        print(f"Google Sheets pool baseline synced: {len(current)} number(s)", flush=True)
+        return
+
+    previous = _sheets_pool_previous
+    current_keys = set(current)
+    previous_keys = set(previous)
+
+    for key in sorted(current_keys - previous_keys):
+        item = current[key]
+        await _post_sheets({
+            "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+            "number": item["name"],
+            "event": "returned" if key in _sheets_ever_seen else "new",
+            "price": item.get("price"),
+            "currency": item.get("currency", ""),
+            "duration": None,
+            "tx_hash": "",
+            "source": "Marketapp pool",
+        })
+
+    for key in sorted(previous_keys - current_keys):
+        item = previous[key]
+        await _post_sheets({
+            "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+            "number": item["name"],
+            "event": "removed",
+            "price": item.get("price"),
+            "currency": item.get("currency", ""),
+            "duration": None,
+            "tx_hash": "",
+            "source": "Marketapp pool",
+        })
+
+    for key in sorted(current_keys & previous_keys):
+        old = previous[key]
+        new = current[key]
+        if old.get("price") != new.get("price") or old.get("currency") != new.get("currency"):
+            await _post_sheets({
+                "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+                "number": new["name"],
+                "event": "price_change",
+                "price": new.get("price"),
+                "currency": new.get("currency", ""),
+                "duration": None,
+                "tx_hash": "",
+                "source": "Marketapp pool",
+            })
+
+    _sheets_ever_seen.update(current_keys)
+    _sheets_pool_previous = current
+
+
+async def _sync_history_to_sheets(data: Any) -> None:
+    """Send new rent-history events; first run also seeds recent history."""
+    global _sheets_history_initialized
+
+    history = extract_history_items(data)
+    current_ids = [history_event_key(item) for item in history]
+
+    if not _sheets_history_initialized:
+        _sheets_history_seen.update(current_ids)
+        _sheets_history_initialized = True
+        seed = history[:20]
+        for item in reversed(seed):
+            await _post_history_item_to_sheets(item, "history_snapshot")
+        print(f"Google Sheets history baseline synced: {len(seed)} event(s)", flush=True)
+        return
+
+    new_items: list[dict[str, Any]] = []
+    for item, event_id in zip(history, current_ids):
+        if event_id not in _sheets_history_seen:
+            new_items.append(item)
+
+    _sheets_history_seen.update(current_ids)
+    for item in reversed(new_items):
+        await _post_history_item_to_sheets(
+            item,
+            "rent_extended" if item.get("is_extend") else "rent",
+        )
+
+    if new_items:
+        print(f"Google Sheets history synced: {len(new_items)} new event(s)", flush=True)
+
+
+async def _post_history_item_to_sheets(item: dict[str, Any], event: str) -> None:
+    timestamp = item.get("ts")
+    if isinstance(timestamp, (int, float)):
+        formatted_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(timestamp))
+    else:
+        formatted_time = str(timestamp or "")
+
+    await _post_sheets({
+        "time": formatted_time,
+        "number": item.get("name") or item.get("address") or "",
+        "event": event,
+        "price": item.get("price"),
+        "currency": item.get("currency") or "",
+        "duration": item.get("duration"),
+        "tx_hash": item.get("tx_hash") or "",
+        "source": "Marketapp history",
+    })
 
 
 async def _get(endpoint: str) -> Any:
@@ -68,13 +202,13 @@ async def get_collections() -> Any:
 
 async def get_rent_numbers() -> Any:
     data = await _get("/v1/rent/numbers/")
-    await _post_sheets({"type": "pool", "data": data})
+    await _sync_pool_to_sheets(data)
     return data
 
 
 async def get_numbers_history() -> Any:
     data = await _get("/v1/rent/numbers/history/")
-    await _post_sheets({"type": "history", "data": data})
+    await _sync_history_to_sheets(data)
     return data
 
 
