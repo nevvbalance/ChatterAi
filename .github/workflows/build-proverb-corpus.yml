@@ -12,7 +12,7 @@ on:
     - cron: "17 3 1 * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -71,14 +71,11 @@ jobs:
               raise SystemExit("Classified corpus is empty")
           PY
 
-      - name: Commit updated corpus
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/dal_corpus.json data/proverbs.json
-          if git diff --cached --quiet; then
-            echo "No corpus changes"
-          else
-            git commit -m "Update and classify proverb corpus"
-            git push
-          fi
+      - name: Upload corpus artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proverb-corpus
+          path: |
+            data/dal_corpus.json
+            data/proverbs.json
+          retention-days: 30

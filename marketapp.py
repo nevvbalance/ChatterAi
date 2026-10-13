@@ -1,177 +1,21 @@
 import html
 import json
 import os
-import time
 from typing import Any
 
 import aiohttp
 
-
 BASE_URL = "https://api.marketapp.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
-SHEETS_WEBHOOK_URL = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
-SHEETS_SECRET = os.environ.get("GOOGLE_SHEETS_SECRET", "").strip()
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=20)
 
-_sheets_pool_previous: dict[str, dict[str, Any]] | None = None
-_sheets_ever_seen: set[str] = set()
-_sheets_history_seen: set[str] = set()
-_sheets_history_initialized = False
+_session: aiohttp.ClientSession | None = None
 
 
-async def _post_sheets(payload: dict[str, Any]) -> None:
-    """Best-effort sync to the Google Sheets Apps Script webhook."""
-    if not SHEETS_WEBHOOK_URL or not SHEETS_SECRET:
-        print("Google Sheets sync: disabled, webhook/secret is missing", flush=True)
-        return
-
-    body = dict(payload)
-    body["secret"] = SHEETS_SECRET
-    timeout = aiohttp.ClientTimeout(total=15)
-
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                SHEETS_WEBHOOK_URL,
-                json=body,
-                headers={"Content-Type": "application/json"},
-            ) as response:
-                text = await response.text()
-                if response.status >= 400:
-                    print(f"Google Sheets sync HTTP {response.status}: {text[:500]}", flush=True)
-                else:
-                    print(f"Google Sheets sync: HTTP {response.status}, response={text[:500]}", flush=True)
-    except Exception as exc:
-        print(f"Google Sheets sync ERROR: {exc!r}", flush=True)
-
-
-async def _sync_pool_to_sheets(data: Any) -> None:
-    """Send only meaningful pool changes, with a first-run snapshot."""
-    global _sheets_pool_previous
-
-    items, _ = _extract_items(data)
-    current = build_number_snapshot(data)
-
-    if _sheets_pool_previous is None:
-        _sheets_pool_previous = current
-        _sheets_ever_seen.update(current)
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            price, currency = number_price(item)
-            address = str(item.get("address") or item.get("nft_address") or "")
-            await _post_sheets({
-                "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-                "number": number_name(item),
-                "event": "pool_snapshot",
-                "price": price,
-                "currency": currency,
-                "duration": format_sheet_duration(item.get("min_duration") or item.get("max_duration")),
-                "address": address,
-                "tx_hash": "",
-                "source": "Marketapp pool",
-            })
-        print(f"Google Sheets pool baseline synced: {len(current)} number(s)", flush=True)
-        return
-
-    previous = _sheets_pool_previous
-    current_keys = set(current)
-    previous_keys = set(previous)
-
-    for key in sorted(current_keys - previous_keys):
-        item = current[key]
-        await _post_sheets({
-            "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-            "number": item["name"],
-            "event": "returned" if key in _sheets_ever_seen else "new",
-            "price": item.get("price"),
-            "currency": item.get("currency", ""),
-            "duration": "",
-            "address": item.get("address", ""),
-            "tx_hash": "",
-            "source": "Marketapp pool",
-        })
-
-    for key in sorted(previous_keys - current_keys):
-        item = previous[key]
-        await _post_sheets({
-            "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-            "number": item["name"],
-            "event": "removed",
-            "price": item.get("price"),
-            "currency": item.get("currency", ""),
-            "duration": "",
-            "address": item.get("address", ""),
-            "tx_hash": "",
-            "source": "Marketapp pool",
-        })
-
-    for key in sorted(current_keys & previous_keys):
-        old = previous[key]
-        new = current[key]
-        if old.get("price") != new.get("price") or old.get("currency") != new.get("currency"):
-            await _post_sheets({
-                "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-                "number": new["name"],
-                "event": "price_change",
-                "price": new.get("price"),
-                "currency": new.get("currency", ""),
-                "duration": "",
-                "address": new.get("address", ""),
-                "tx_hash": "",
-                "source": "Marketapp pool",
-            })
-
-    _sheets_ever_seen.update(current_keys)
-    _sheets_pool_previous = current
-
-
-async def _sync_history_to_sheets(data: Any) -> None:
-    """Send new rent-history events; first run also seeds recent history."""
-    global _sheets_history_initialized
-
-    history = extract_history_items(data)
-    current_ids = [history_event_key(item) for item in history]
-
-    if not _sheets_history_initialized:
-        _sheets_history_seen.update(current_ids)
-        _sheets_history_initialized = True
-        seed = history[:20]
-        for item in reversed(seed):
-            await _post_history_item_to_sheets(item, "history_snapshot")
-        print(f"Google Sheets history baseline synced: {len(seed)} event(s)", flush=True)
-        return
-
-    new_items: list[dict[str, Any]] = []
-    for item, event_id in zip(history, current_ids):
-        if event_id not in _sheets_history_seen:
-            new_items.append(item)
-
-    _sheets_history_seen.update(current_ids)
-    for item in reversed(new_items):
-        await _post_history_item_to_sheets(item, "rent_extended" if item.get("is_extend") else "rent")
-
-    if new_items:
-        print(f"Google Sheets history synced: {len(new_items)} new event(s)", flush=True)
-
-
-async def _post_history_item_to_sheets(item: dict[str, Any], event: str) -> None:
-    timestamp = item.get("ts")
-    if isinstance(timestamp, (int, float)):
-        formatted_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(timestamp))
-    else:
-        formatted_time = str(timestamp or "")
-
-    await _post_sheets({
-        "time": formatted_time,
-        "number": item.get("name") or item.get("number") or item.get("address") or "",
-        "event": event,
-        "price": item.get("price") or item.get("price_nano"),
-        "currency": item.get("currency") or ("TON" if item.get("price_nano") is not None else ""),
-        "duration": format_sheet_duration(item.get("duration")),
-        "address": item.get("address") or "",
-        "tx_hash": item.get("tx_hash") or "",
-        "source": "Marketapp history",
-    })
+def bind_session(session: aiohttp.ClientSession | None) -> None:
+    """Reuse a shared HTTP session instead of opening one per request."""
+    global _session
+    _session = session
 
 
 async def _get(endpoint: str) -> Any:
@@ -181,17 +25,25 @@ async def _get(endpoint: str) -> Any:
         raise RuntimeError("MARKETAPP_API_TOKEN is not configured")
 
     headers = {"Authorization": token}
-    timeout = aiohttp.ClientTimeout(total=20)
+    url = f"{BASE_URL}{endpoint}"
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(f"{BASE_URL}{endpoint}", headers=headers) as response:
-            text = await response.text()
-            if response.status >= 400:
-                raise RuntimeError(f"Marketapp API HTTP {response.status}: {text[:500]}")
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                return text
+    if _session is not None and not _session.closed:
+        async with _session.get(url, headers=headers) as response:
+            return await _read_response(response)
+
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
+        async with session.get(url, headers=headers) as response:
+            return await _read_response(response)
+
+
+async def _read_response(response: aiohttp.ClientResponse) -> Any:
+    text = await response.text()
+    if response.status >= 400:
+        raise RuntimeError(f"Marketapp API HTTP {response.status}: {text[:500]}")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 async def get_collections() -> Any:
@@ -199,15 +51,11 @@ async def get_collections() -> Any:
 
 
 async def get_rent_numbers() -> Any:
-    data = await _get("/v1/rent/numbers/")
-    await _sync_pool_to_sheets(data)
-    return data
+    return await _get("/v1/rent/numbers/")
 
 
 async def get_numbers_history() -> Any:
-    data = await _get("/v1/rent/numbers/history/")
-    await _sync_history_to_sheets(data)
-    return data
+    return await _get("/v1/rent/numbers/history/")
 
 
 def _format_value(value: Any) -> str:
@@ -384,7 +232,8 @@ def build_number_snapshot(data: Any) -> dict[str, dict[str, Any]]:
             "price": str(price) if price is not None else None,
             "currency": currency,
             "address": address,
-            "item": item,
+            "min_duration": item.get("min_duration") if isinstance(item, dict) else None,
+            "max_duration": item.get("max_duration") if isinstance(item, dict) else None,
         }
     return snapshot
 
