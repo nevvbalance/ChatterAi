@@ -13,6 +13,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_PERSONAL_FILENAME = "chatterai-blagodarnost.txt"
 DEFAULT_LINK_LABEL = "Перейти по ссылке"
 SECRETS_DIR = Path("/etc/secrets")
+ANIMATION_SUFFIXES = {".gif", ".mp4", ".webm"}
 CAPTION = "💛 Спасибо за поддержку! Держи файл-благодарность."
 READY_CAPTION = "💛 И небольшой подарок от ChatterAi."
 _proverbs_cache: list[dict[str, Any]] | None = None
@@ -35,6 +36,11 @@ def link_keyboard() -> InlineKeyboardMarkup | None:
 
 def personal_filename() -> str:
     return os.environ.get("BONUS_PERSONAL_FILENAME", "").strip() or DEFAULT_PERSONAL_FILENAME
+
+
+def ready_file_id() -> str:
+    """Telegram file_id of the ready-made bonus, uploaded to Telegram once."""
+    return os.environ.get("BONUS_FILE_ID", "").strip()
 
 
 def ready_file_path() -> Path | None:
@@ -119,6 +125,41 @@ def ready_document(path: Path) -> InputFile:
     return InputFile(io.BytesIO(path.read_bytes()), filename=path.name)
 
 
+async def _send_ready(bot: Any, chat_id: int) -> str | None:
+    """Send the ready-made bonus: by Telegram file_id first, then from a local path."""
+    file_id = ready_file_id()
+    if file_id:
+        try:
+            await bot.send_animation(chat_id=chat_id, animation=file_id, caption=READY_CAPTION)
+            return f"file_id:{file_id[:8]}…"
+        except Exception as exc:
+            print(f"Bonus: send_animation by file_id failed, trying a document: {exc!r}", flush=True)
+            try:
+                await bot.send_document(chat_id=chat_id, document=file_id, caption=READY_CAPTION)
+                return f"file_id:{file_id[:8]}…"
+            except Exception as document_exc:
+                print(f"Bonus: ready file by file_id failed for chat {chat_id}: {document_exc!r}", flush=True)
+                return None
+
+    path = ready_file_path()
+    if path is None:
+        configured = os.environ.get("BONUS_FILE_PATH", "").strip()
+        if configured:
+            print(f"Bonus: BONUS_FILE_PATH={configured!r} does not point to an existing file", flush=True)
+        return None
+
+    try:
+        document = ready_document(path)
+        if path.suffix.lower() in ANIMATION_SUFFIXES:
+            await bot.send_animation(chat_id=chat_id, animation=document, caption=READY_CAPTION)
+        else:
+            await bot.send_document(chat_id=chat_id, document=document, caption=READY_CAPTION)
+        return path.name
+    except Exception as exc:
+        print(f"Bonus: ready file delivery failed for chat {chat_id}: {exc!r}", flush=True)
+        return None
+
+
 async def deliver(bot: Any, chat_id: int, info: dict[str, Any]) -> dict[str, Any]:
     """Send the personal file, then the ready-made bonus and the link button."""
     result: dict[str, Any] = {"personal": None, "ready": None, "link": link_url() or None}
@@ -134,17 +175,7 @@ async def deliver(bot: Any, chat_id: int, info: dict[str, Any]) -> dict[str, Any
     except Exception as exc:
         print(f"Bonus: personal file delivery failed for chat {chat_id}: {exc!r}", flush=True)
 
-    path = ready_file_path()
-    if path is not None:
-        try:
-            await bot.send_document(chat_id=chat_id, document=ready_document(path), caption=READY_CAPTION)
-            result["ready"] = path.name
-        except Exception as exc:
-            print(f"Bonus: ready file delivery failed for chat {chat_id}: {exc!r}", flush=True)
-    else:
-        configured = os.environ.get("BONUS_FILE_PATH", "").strip()
-        if configured:
-            print(f"Bonus: BONUS_FILE_PATH={configured!r} does not point to an existing file", flush=True)
+    result["ready"] = await _send_ready(bot, chat_id)
 
     print(
         f"Bonus delivered: chat={chat_id} personal={result['personal']!r} "
