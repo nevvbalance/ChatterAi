@@ -13,7 +13,7 @@ import state as state_store
 API_BASE = os.environ.get("TON_API_BASE", "https://toncenter.com/api/v3").strip().rstrip("/")
 WALLET_ADDRESS = os.environ.get("TON_WALLET_ADDRESS", "").strip()
 COMMENT_PREFIX = os.environ.get("TON_COMMENT_PREFIX", "donate").strip() or "donate"
-SUGGESTED_AMOUNT = os.environ.get("TON_DONATION_AMOUNT", "1").strip() or "1"
+SUGGESTED_AMOUNT = os.environ.get("TON_DONATION_AMOUNT", "0.1").strip() or "0.1"
 POLL_INTERVAL = int(os.environ.get("TON_POLL_INTERVAL", "120"))
 HISTORY_LIMIT = int(os.environ.get("TON_HISTORY_LIMIT", "50"))
 MAX_ATTEMPTS = int(os.environ.get("TON_MAX_ATTEMPTS", "4"))
@@ -197,7 +197,7 @@ def short_address(address: str) -> str:
     return f"{address[:6]}…{address[-6:]}"
 
 
-def format_donate(chat_id: int) -> str:
+def format_donate(chat_id: int, one_tap: bool = False) -> str:
     if not enabled():
         return (
             "💛 <b>Донаты пока не настроены</b>\n\n"
@@ -207,6 +207,11 @@ def format_donate(chat_id: int) -> str:
 
     amount = SUGGESTED_AMOUNT
     comment = comment_for(chat_id)
+    one_tap_hint = (
+        "\n\nКнопка ниже откроет страницу оплаты: кошелёк подставит сумму и комментарий сам."
+        if one_tap
+        else ""
+    )
     return (
         "💛 <b>Поддержать ChatterAi</b>\n\n"
         "Бот бесплатный, но если хочется отблагодарить — вот кошелёк:\n\n"
@@ -219,7 +224,7 @@ def format_donate(chat_id: int) -> str:
         "а не с биржи: биржи часто не передают комментарий, и платёж потеряется;\n"
         "• добавь к сумме чуть-чуть сверху на комиссию сети;\n"
         "• проверить, дошло ли, можно командой /mydonations.\n\n"
-        f"Я проверяю новые переводы каждые {POLL_INTERVAL} сек и говорю спасибо в этот чат."
+        f"Я проверяю новые переводы каждые {POLL_INTERVAL} сек и говорю спасибо в этот чат.{one_tap_hint}"
     )
 
 

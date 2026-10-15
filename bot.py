@@ -3,16 +3,18 @@ import hashlib
 import html
 import os
 import time
+from pathlib import Path
 from typing import Any, Iterable
 
 import aiohttp
 from aiohttp import web
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import marketapp
 import state as state_store
 import ton_payments
+import ton_web
 from data.proverb_loader import search_proverbs
 from marketapp import (
     format_debug,
@@ -274,10 +276,17 @@ async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     print("Telegram /donate handler received an update", flush=True)
     if not update.effective_chat:
         return
-    await update.message.reply_text(
-        ton_payments.format_donate(update.effective_chat.id),
-        parse_mode="HTML",
-    )
+
+    chat_id = update.effective_chat.id
+    pay_url = ton_web.public_pay_url(chat_id)
+    text = ton_payments.format_donate(chat_id, one_tap=bool(pay_url))
+
+    if not pay_url:
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💛 Оплатить в один тап", url=pay_url)]])
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def mydonations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -446,6 +455,40 @@ def create_app() -> web.Application:
     async def health(request: web.Request) -> web.Response:
         return web.Response(text="ChatterAi is alive! 🤖")
 
+    async def pay_page(request: web.Request) -> web.Response:
+        try:
+            chat_id = int(request.query.get("chat", ""))
+        except (TypeError, ValueError):
+            return web.Response(status=400, text="Query parameter chat must be an integer")
+
+        if not ton_payments.enabled():
+            return web.Response(status=503, text="Donations are not configured")
+
+        try:
+            page = ton_web.render_page(chat_id, str(request.url.origin()))
+        except Exception as exc:
+            print(f"TON pay page error: {exc!r}", flush=True)
+            return web.Response(status=500, text="Cannot render the payment page")
+
+        return web.Response(text=page, content_type="text/html", charset="utf-8")
+
+    async def tonconnect_manifest(request: web.Request) -> web.Response:
+        print("TON Connect manifest requested", flush=True)
+        return web.json_response(
+            ton_web.manifest(str(request.url.origin())),
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    async def tonconnect_icon(request: web.Request) -> web.Response:
+        icon_path = Path(__file__).resolve().parent / "static" / "icon-180.png"
+        if not icon_path.exists():
+            return web.Response(status=404, text="Not found")
+        return web.Response(
+            body=icon_path.read_bytes(),
+            content_type="image/png",
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
     async def telegram_webhook(request: web.Request) -> web.Response:
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != webhook_secret:
             print("Telegram webhook: rejected request with invalid secret", flush=True)
@@ -469,6 +512,9 @@ def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
+    app.router.add_get(ton_web.PAY_PATH, pay_page)
+    app.router.add_get(ton_web.MANIFEST_PATH, tonconnect_manifest)
+    app.router.add_get(ton_web.ICON_PATH, tonconnect_icon)
     app.router.add_post(webhook_path, telegram_webhook)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
