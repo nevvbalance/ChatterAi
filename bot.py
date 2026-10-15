@@ -689,6 +689,7 @@ def create_app() -> web.Application:
             f"file_id={'set' if bonus.ready_file_id() else 'missing'}, "
             f"file_path={bonus.ready_file_path() or 'missing'}, "
             f"link={'set' if bonus.link_url() else 'missing'}, "
+            f"effect={'set' if bonus.effect_id() else 'missing'}, "
             f"label={bonus.link_label()!r}",
             flush=True,
         )

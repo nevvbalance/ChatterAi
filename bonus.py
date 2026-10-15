@@ -38,6 +38,11 @@ def personal_filename() -> str:
     return os.environ.get("BONUS_PERSONAL_FILENAME", "").strip() or DEFAULT_PERSONAL_FILENAME
 
 
+def effect_id() -> str:
+    """Telegram message effect: a full-screen animation, private chats only."""
+    return os.environ.get("PAY_EFFECT_ID", "").strip()
+
+
 def ready_file_id() -> str:
     """Telegram file_id of the ready-made bonus, uploaded to Telegram once."""
     return os.environ.get("BONUS_FILE_ID", "").strip()
@@ -160,20 +165,48 @@ async def _send_ready(bot: Any, chat_id: int) -> str | None:
         return None
 
 
-async def deliver(bot: Any, chat_id: int, info: dict[str, Any]) -> dict[str, Any]:
-    """Send the personal file, then the ready-made bonus and the link button."""
-    result: dict[str, Any] = {"personal": None, "ready": None, "link": link_url() or None}
+async def _send_personal(bot: Any, chat_id: int, info: dict[str, Any]) -> tuple[bool, str | None]:
+    """Send the personal file with the payment effect, falling back without it.
 
+    Returns (delivered, effect_actually_applied).
+    """
+    effect = effect_id() or None
     try:
         await bot.send_document(
             chat_id=chat_id,
             document=personal_document(info),
             caption=CAPTION,
             reply_markup=link_keyboard(),
+            message_effect_id=effect,
         )
-        result["personal"] = personal_filename()
+        return True, effect
     except Exception as exc:
-        print(f"Bonus: personal file delivery failed for chat {chat_id}: {exc!r}", flush=True)
+        if not effect:
+            print(f"Bonus: personal file delivery failed for chat {chat_id}: {exc!r}", flush=True)
+            return False, None
+
+        print(f"Bonus: effect {effect!r} rejected, retrying without it: {exc!r}", flush=True)
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=personal_document(info),
+                caption=CAPTION,
+                reply_markup=link_keyboard(),
+            )
+            return True, None
+        except Exception as retry_exc:
+            print(f"Bonus: personal file delivery failed for chat {chat_id}: {retry_exc!r}", flush=True)
+            return False, None
+
+
+async def deliver(bot: Any, chat_id: int, info: dict[str, Any]) -> dict[str, Any]:
+    """Send the personal file, then the ready-made bonus and the link button."""
+    result: dict[str, Any] = {"personal": None, "ready": None, "link": link_url() or None, "effect": None}
+
+    delivered, applied_effect = await _send_personal(bot, chat_id, info)
+    if delivered:
+        result["personal"] = personal_filename()
+        result["effect"] = applied_effect
 
     result["ready"] = await _send_ready(bot, chat_id)
 
