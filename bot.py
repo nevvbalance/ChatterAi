@@ -23,6 +23,7 @@ from telegram.ext import (
 import bonus
 import channel_access
 import marketapp
+import picker
 import state as state_store
 import stars
 import ton_payments
@@ -196,7 +197,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/stars — поддержать бота звёздами Telegram\n"
         "/terms — условия оплаты\n"
         "/paysupport — поддержка по платежам\n"
-        "/stars_status — состояние платежей в звёздах\n\n"
+        "/stars_status — состояние платежей в звёздах\n"
+        "/pack — листать набор стикеров или эмодзи и выбрать нужный\n\n"
         "Монитор работает постоянно и сам поднимается после каждого деплоя.\n"
         "Уведомления приходят во все чаты, где включён /monitor, а также в чаты из "
         "переменной окружения MONITOR_CHAT_ID.\n\n"
@@ -499,6 +501,108 @@ async def stars_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+PACK_CACHE: dict[str, list[dict[str, Any]]] = {}
+
+
+async def load_pack(bot: Any, name: str) -> list[dict[str, Any]]:
+    """Read a sticker or custom-emoji pack, cached in memory for this process."""
+    if name in PACK_CACHE:
+        return PACK_CACHE[name]
+    sticker_set = await bot.get_sticker_set(name)
+    items = [picker.normalize(sticker) for sticker in sticker_set.stickers]
+    PACK_CACHE[name] = items
+    print(f"Pick: loaded pack {name!r} ({sticker_set.title}) with {len(items)} item(s)", flush=True)
+    return items
+
+
+async def send_candidate(bot: Any, chat_id: int, pack: str, items: list[dict[str, Any]], index: int) -> None:
+    if not items:
+        return
+    index %= len(items)
+    item = items[index]
+    markup = picker.keyboard(pack, index, len(items))
+    if item["kind"] == "custom_emoji":
+        text, entities = picker.emoji_message(item, index + 1, len(items))
+        await bot.send_message(chat_id=chat_id, text=text, entities=entities, reply_markup=markup)
+        return
+    await bot.send_sticker(chat_id=chat_id, sticker=item["file_id"], reply_markup=markup)
+
+
+async def pack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /pack handler received an update", flush=True)
+    if not update.message or not update.effective_chat:
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Укажи имя набора: /pack имя\n\n"
+            "Имя берётся из ссылки на набор: t.me/addstickers/имя или t.me/addemoji/имя."
+        )
+        return
+
+    name = args[0].strip().lstrip("@")
+    try:
+        sticker_set = await context.bot.get_sticker_set(name)
+        items = [picker.normalize(sticker) for sticker in sticker_set.stickers]
+    except Exception as exc:
+        print(f"Pick: cannot load pack {name!r}: {exc!r}", flush=True)
+        await update.message.reply_text(
+            f"Не смог открыть набор «{name}». Проверь имя — оно должно быть из ссылки на набор."
+        )
+        return
+
+    if not items:
+        await update.message.reply_text("В этом наборе нет элементов.")
+        return
+
+    PACK_CACHE[name] = items
+    await update.message.reply_text(picker.summarize(sticker_set.title, name, items))
+    await send_candidate(context.bot, update.effective_chat.id, name, items, 0)
+
+
+async def pack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    print(f"Telegram callback received: {query.data if query else None}", flush=True)
+    if query is None or query.message is None:
+        return
+
+    decoded = picker.decode(query.data or "")
+    if decoded is None:
+        await query.answer()
+        return
+
+    pack, index, action = decoded
+    try:
+        items = await load_pack(context.bot, pack)
+    except Exception as exc:
+        print(f"Pick: cannot reload pack {pack!r}: {exc!r}", flush=True)
+        await query.answer("Не смог перечитать набор", show_alert=True)
+        return
+
+    if not items:
+        await query.answer("В наборе нет элементов", show_alert=True)
+        return
+
+    index %= len(items)
+    if action == picker.ACTION_CHOOSE:
+        item = items[index]
+        print(
+            f"PICK CHOSEN: pack={pack} position={index + 1}/{len(items)} kind={item['kind']} "
+            f"id={item['id']} emoji={item['emoji']!r} animated={item['is_animated']} video={item['is_video']}",
+            flush=True,
+        )
+        await query.answer("Записал!")
+        await query.message.reply_text(
+            f"Записал: {item['kind']}, №{index + 1} из {len(items)}.\n"
+            "Скажи в чате с MultiTool — подключу его к благодарности за оплату."
+        )
+        return
+
+    await query.answer()
+    await send_candidate(context.bot, query.message.chat_id, pack, items, index)
+
+
 async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     request = update.chat_join_request
     if request is None:
@@ -625,6 +729,8 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("paysupport", paysupport_command))
     telegram_app.add_handler(CommandHandler("stars_status", stars_status_command))
     telegram_app.add_handler(CallbackQueryHandler(stars_callback, pattern=r"^stars:"))
+    telegram_app.add_handler(CommandHandler("pack", pack_command))
+    telegram_app.add_handler(CallbackQueryHandler(pack_callback, pattern=r"^pick:"))
     telegram_app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
     join_target = channel_access.target_chat()
     if isinstance(join_target, int):
