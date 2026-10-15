@@ -12,6 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, U
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -20,6 +21,7 @@ from telegram.ext import (
 )
 
 import bonus
+import channel_access
 import marketapp
 import state as state_store
 import stars
@@ -497,6 +499,54 @@ async def stars_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    request = update.chat_join_request
+    if request is None:
+        return
+
+    user = request.from_user
+    print(
+        f"Telegram chat_join_request: chat={request.chat.id} user={user.id} "
+        f"user_chat={request.user_chat_id}",
+        flush=True,
+    )
+
+    evidence = await channel_access.payment_evidence(request.user_chat_id, user.id)
+    if evidence is None:
+        print(
+            f"Join request left pending: chat={request.chat.id} user={user.id} — "
+            "no confirmed payment found, manual review needed",
+            flush=True,
+        )
+        return
+
+    try:
+        await context.bot.approve_chat_join_request(chat_id=request.chat.id, user_id=user.id)
+    except Exception as exc:
+        print(
+            f"Join request approval FAILED: chat={request.chat.id} user={user.id}: {exc!r} "
+            "(bot must be an administrator with the can_invite_users right)",
+            flush=True,
+        )
+        return
+
+    print(
+        f"Join request approved: chat={request.chat.id} user={user.id} "
+        f"evidence={evidence.get('source')} amount={evidence.get('amount')} "
+        f"durable={evidence.get('durable')}",
+        flush=True,
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=request.user_chat_id,
+            text=channel_access.format_approval_note(evidence),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        print(f"Join request: cannot notify user {user.id}: {exc!r}", flush=True)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"Telegram handler error: {context.error!r}", flush=True)
     await notify_chats(
@@ -576,6 +626,13 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("stars_status", stars_status_command))
     telegram_app.add_handler(CallbackQueryHandler(stars_callback, pattern=r"^stars:"))
     telegram_app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
+    join_target = channel_access.target_chat()
+    if isinstance(join_target, int):
+        telegram_app.add_handler(ChatJoinRequestHandler(chat_join_request_handler, chat_id=join_target))
+    elif isinstance(join_target, str):
+        telegram_app.add_handler(ChatJoinRequestHandler(chat_join_request_handler, username=join_target))
+    else:
+        telegram_app.add_handler(ChatJoinRequestHandler(chat_join_request_handler))
     telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(error_handler)
@@ -633,6 +690,11 @@ def create_app() -> web.Application:
             f"file_path={bonus.ready_file_path() or 'missing'}, "
             f"link={'set' if bonus.link_url() else 'missing'}, "
             f"label={bonus.link_label()!r}",
+            flush=True,
+        )
+        print(
+            f"Join auto-approval: target={channel_access.target_chat() or 'any chat'}, "
+            f"scan_limit={channel_access.scan_limit()}",
             flush=True,
         )
 
