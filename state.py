@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_STATE_FILE = Path(__file__).resolve().parent / "state" / "monitor_state.json"
+DEFAULT_DONATIONS_STATE_FILE = Path(__file__).resolve().parent / "state" / "donations_state.json"
 
 
 def state_file() -> Path:
@@ -12,8 +13,13 @@ def state_file() -> Path:
     return Path(raw).expanduser() if raw else DEFAULT_STATE_FILE
 
 
-def load_state() -> dict[str, Any]:
-    path = state_file()
+def donations_state_file() -> Path:
+    raw = os.environ.get("DONATIONS_STATE_FILE", "").strip()
+    return Path(raw).expanduser() if raw else DEFAULT_DONATIONS_STATE_FILE
+
+
+def load_state(path: Path | None = None) -> dict[str, Any]:
+    path = path or state_file()
     if not path.exists():
         return {}
     try:
@@ -28,8 +34,8 @@ def load_state() -> dict[str, Any]:
     return data
 
 
-def save_state(state: dict[str, Any]) -> bool:
-    path = state_file()
+def save_state(state: dict[str, Any], path: Path | None = None) -> bool:
+    path = path or state_file()
     tmp_name: str | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

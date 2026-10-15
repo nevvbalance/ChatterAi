@@ -12,6 +12,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 import marketapp
 import state as state_store
+import ton_payments
 from data.proverb_loader import search_proverbs
 from marketapp import (
     format_debug,
@@ -34,6 +35,7 @@ MAX_OUTBOX = int(os.environ.get("MONITOR_MAX_OUTBOX", "500"))
 MAX_SEND_ATTEMPTS = int(os.environ.get("MONITOR_SEND_ATTEMPTS", "5"))
 
 number_monitor = MarketMonitor(interval=MONITOR_INTERVAL, lookback=HISTORY_LOOKBACK)
+ton_monitor = ton_payments.TonDonationMonitor()
 sheets_sync = SheetsSync(
     os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", ""),
     os.environ.get("GOOGLE_SHEETS_SECRET", ""),
@@ -133,6 +135,13 @@ async def notify_chats(text: str) -> None:
     await delivery.flush()
 
 
+async def send_to_chats(text: str, chat_ids: list[int]) -> None:
+    if delivery is None or not chat_ids:
+        return
+    delivery.enqueue(text, chat_ids)
+    await delivery.flush()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("Telegram /start handler received an update", flush=True)
     await update.message.reply_text(
@@ -154,7 +163,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/monitor — подписать этот чат на уведомления монитора\n"
         "/monitor_status — показать состояние монитора\n"
         "/monitor_test — проверить отправку уведомлений\n"
-        "/monitor_off — отписать этот чат от уведомлений\n\n"
+        "/monitor_off — отписать этот чат от уведомлений\n"
+        "/donate — реквизиты для поддержки бота в Gram\n"
+        "/mydonations — проверить свои подтверждённые донаты\n"
+        "/donations_status — состояние проверки донатов\n\n"
         "Монитор работает постоянно и сам поднимается после каждого деплоя.\n"
         "Уведомления приходят во все чаты, где включён /monitor, а также в чаты из "
         "переменной окружения MONITOR_CHAT_ID.\n\n"
@@ -258,6 +270,42 @@ async def monitor_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Этот чат и так не был подписан на уведомления.")
 
 
+async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /donate handler received an update", flush=True)
+    if not update.effective_chat:
+        return
+    await update.message.reply_text(
+        ton_payments.format_donate(update.effective_chat.id),
+        parse_mode="HTML",
+    )
+
+
+async def mydonations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /mydonations handler received an update", flush=True)
+    if not update.effective_chat:
+        return
+
+    chat_id = update.effective_chat.id
+    if not ton_payments.enabled():
+        await update.message.reply_text(ton_payments.format_donate(chat_id), parse_mode="HTML")
+        return
+
+    await update.message.reply_text("Смотрю блокчейн TON... 🔎")
+    try:
+        donations = await ton_monitor.donations_for_chat(chat_id)
+        await update.message.reply_text(ton_payments.format_donations(donations, chat_id), parse_mode="HTML")
+    except Exception as exc:
+        print(f"TON /mydonations error: {exc!r}", flush=True)
+        await update.message.reply_text(f"Ошибка TON API: {exc}")
+
+
+async def donations_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /donations_status handler received an update", flush=True)
+    text = ton_monitor.status_text()
+    text += f"\n🗂 файл состояния: <code>{state_store.donations_state_file()}</code>"
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"Telegram handler error: {context.error!r}", flush=True)
     await notify_chats(
@@ -328,6 +376,9 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("monitor_status", monitor_status_command))
     telegram_app.add_handler(CommandHandler("monitor_test", monitor_test_command))
     telegram_app.add_handler(CommandHandler("monitor_off", monitor_off_command))
+    telegram_app.add_handler(CommandHandler("donate", donate_command))
+    telegram_app.add_handler(CommandHandler("mydonations", mydonations_command))
+    telegram_app.add_handler(CommandHandler("donations_status", donations_status_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(error_handler)
 
@@ -370,10 +421,20 @@ def create_app() -> web.Application:
         )
         number_monitor.start(publish_events, notify_chats, delivery.flush)
 
+        ton_monitor.load()
+        ton_monitor.start(send_to_chats, delivery.flush)
+        print(
+            f"TON donations: enabled={ton_payments.enabled()}, "
+            f"wallet={ton_payments.WALLET_ADDRESS or 'not configured'}, "
+            f"interval={ton_monitor.interval}s",
+            flush=True,
+        )
+
     async def on_cleanup(app: web.Application) -> None:
         global http_session
         print("Telegram cleanup: stopping monitor and application", flush=True)
         await number_monitor.stop()
+        await ton_monitor.stop()
         if http_session is not None:
             await http_session.close()
             http_session = None
