@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 import aiohttp
@@ -26,6 +27,7 @@ COMMENT_RE = re.compile(rf"^{re.escape(COMMENT_PREFIX)}-(-?\d+)$")
 
 Sender = Callable[[str, list[int]], Awaitable[None]]
 Drain = Callable[[], Awaitable[None]]
+Reward = Callable[[dict[str, Any]], Awaitable[None]]
 
 _session: aiohttp.ClientSession | None = None
 
@@ -225,6 +227,7 @@ def format_donate(chat_id: int, one_tap: bool = False) -> str:
         "• добавь к сумме чуть-чуть сверху на комиссию сети;\n"
         "• проверить, дошло ли, можно командой /mydonations.\n\n"
         f"Я проверяю новые переводы каждые {POLL_INTERVAL} сек и говорю спасибо в этот чат.{one_tap_hint}"
+        "\n\nПосле зачисления бот пришлёт файл с благодарностью и ссылку."
     )
 
 
@@ -237,6 +240,24 @@ def format_thanks(donation: dict[str, Any]) -> str:
         f"Транзакция: <code>{html.escape(donation.get('hash') or '')[:44]}…</code>\n\n"
         "Пословица в тему: «Мир не без добрых людей» 🪶"
     )
+
+
+def donation_info(donation: dict[str, Any]) -> dict[str, Any]:
+    """Payment details for the personal bonus file."""
+    created_at = donation.get("now")
+    paid_at = (
+        datetime.fromtimestamp(int(created_at), tz=timezone.utc)
+        if created_at
+        else datetime.now(timezone.utc)
+    )
+    return {
+        "source": "gram",
+        "source_label": "Gram (TON mainnet)",
+        "amount_text": f"{format_amount(int(donation.get('value_nano') or 0))} Gram",
+        "paid_at": paid_at,
+        "reference": donation.get("hash") or "—",
+        "chat_id": donation.get("chat_id"),
+    }
 
 
 def format_donations(donations: list[dict[str, Any]], chat_id: int) -> str:
@@ -277,6 +298,7 @@ class TonDonationMonitor:
         self.state_restored = False
         self.sender: Sender | None = None
         self.drain: Drain | None = None
+        self.reward: Reward | None = None
         self.task: asyncio.Task | None = None
         self.running = False
         self.cycle = 0
@@ -311,12 +333,13 @@ class TonDonationMonitor:
         }
         self.persistence_ok = state_store.save_state(payload, state_store.donations_state_file())
 
-    def start(self, sender: Sender, drain: Drain) -> None:
+    def start(self, sender: Sender, drain: Drain, reward: Reward | None = None) -> None:
         if not enabled():
             print("TON donations monitor not started: TON_WALLET_ADDRESS is not configured", flush=True)
             return
         self.sender = sender
         self.drain = drain
+        self.reward = reward
         self.started_at = time.time()
         if self.task and not self.task.done():
             print("TON donations monitor start requested, but task is already running", flush=True)
@@ -399,6 +422,8 @@ class TonDonationMonitor:
             if self.sender is not None:
                 await self.sender(format_thanks(donation), [donation["chat_id"]])
                 self.thanks_sent += 1
+            if self.reward is not None:
+                await self.reward(donation)
 
         if self.drain is not None:
             await self.drain()

@@ -19,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+import bonus
 import marketapp
 import state as state_store
 import stars
@@ -153,6 +154,16 @@ async def send_to_chats(text: str, chat_ids: list[int]) -> None:
         return
     delivery.enqueue(text, chat_ids)
     await delivery.flush()
+
+
+async def send_gram_bonus(donation: dict[str, Any]) -> None:
+    chat_id = donation.get("chat_id")
+    if delivery is None or chat_id is None:
+        return
+    try:
+        await bonus.deliver(delivery.application.bot, int(chat_id), ton_payments.donation_info(donation))
+    except Exception as exc:
+        print(f"Bonus: gram reward failed for chat {chat_id}: {exc!r}", flush=True)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -435,6 +446,12 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
 
     await message.reply_text(stars.format_thanks(payment), parse_mode="HTML")
 
+    if chat_id is not None:
+        try:
+            await bonus.deliver(context.bot, chat_id, stars.payment_info(payment, chat_id))
+        except Exception as exc:
+            print(f"Bonus: stars reward failed for chat {chat_id}: {exc!r}", flush=True)
+
 
 async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("Telegram /terms handler received an update", flush=True)
@@ -603,7 +620,7 @@ def create_app() -> web.Application:
         number_monitor.start(publish_events, notify_chats, delivery.flush)
 
         ton_monitor.load()
-        ton_monitor.start(send_to_chats, delivery.flush)
+        ton_monitor.start(send_to_chats, delivery.flush, send_gram_bonus)
         print(
             f"TON donations: enabled={ton_payments.enabled()}, "
             f"wallet={ton_payments.WALLET_ADDRESS or 'not configured'}, "

@@ -2,6 +2,7 @@ import html
 import os
 import secrets
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import state as state_store
@@ -94,8 +95,9 @@ def format_offer(chat_id: int, star_amounts: list[int], balance: int | None = No
         "",
         f"Выбери сумму: {buttons}.",
         "Платёж придёт мне через Telegram, чек останется у тебя в приложении.",
+        "После оплаты бот сразу пришлёт небольшой файл с благодарностью и ссылку.",
         "",
-        "Это благодарность: доступ к функциям бота как был, так и остаётся бесплатным.",
+        "Это подарок, а не пропуск: доступ к функциям бота как был, так и остаётся бесплатным.",
     ]
     if balance is not None:
         lines.append("")
@@ -119,8 +121,10 @@ def format_terms() -> str:
     return (
         "📄 <b>Условия оплаты</b>\n\n"
         "Оплата звёздами Telegram — добровольный донат в поддержку бота ChatterAi.\n"
-        "За звёзды не продаётся товар или услуга: функции бота бесплатны и не блокируются, "
-        "взамен ничего не выдаётся.\n\n"
+        "Что приходит после оплаты: персональный текстовый файл с благодарностью — "
+        "сумма, дата, идентификатор платежа и пословица — и ссылка. "
+        "Функции бота при этом остаются бесплатными и не блокируются: файл это подарок, "
+        "а не пропуск к доступу.\n\n"
         "Как это работает:\n"
         "• платёж проходит внутри Telegram в валюте XTR (звёзды), операцию обеспечивает Telegram;\n"
         "• все платежи необратимы на стороне Telegram, возврат делает владелец бота через "
@@ -150,6 +154,18 @@ def format_support() -> str:
     lines.append("")
     lines.append("Владелец бота рассматривает такие запросы и может вернуть звёзды через refundStarPayment.")
     return "\n".join(lines)
+
+
+def payment_info(payment: Any, chat_id: int | None) -> dict[str, Any]:
+    """Payment details for the personal bonus file."""
+    return {
+        "source": "stars",
+        "source_label": "Telegram Stars (XTR)",
+        "amount_text": f"{getattr(payment, 'total_amount', 0)} ⭐",
+        "paid_at": datetime.now(timezone.utc),
+        "reference": getattr(payment, "telegram_payment_charge_id", "") or "—",
+        "chat_id": chat_id,
+    }
 
 
 def record_payment(payment: Any, chat_id: int | None, user_id: int | None) -> dict[str, Any]:
