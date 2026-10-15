@@ -6,6 +6,7 @@ from typing import Any
 
 DEFAULT_STATE_FILE = Path(__file__).resolve().parent / "state" / "monitor_state.json"
 DEFAULT_DONATIONS_STATE_FILE = Path(__file__).resolve().parent / "state" / "donations_state.json"
+DEFAULT_STARS_STATE_FILE = Path(__file__).resolve().parent / "state" / "stars_state.json"
 
 
 def state_file() -> Path:
@@ -16,6 +17,11 @@ def state_file() -> Path:
 def donations_state_file() -> Path:
     raw = os.environ.get("DONATIONS_STATE_FILE", "").strip()
     return Path(raw).expanduser() if raw else DEFAULT_DONATIONS_STATE_FILE
+
+
+def stars_state_file() -> Path:
+    raw = os.environ.get("STARS_STATE_FILE", "").strip()
+    return Path(raw).expanduser() if raw else DEFAULT_STARS_STATE_FILE
 
 
 def load_state(path: Path | None = None) -> dict[str, Any]:

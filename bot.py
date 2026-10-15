@@ -8,11 +8,20 @@ from typing import Any, Iterable
 
 import aiohttp
 from aiohttp import web
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    PreCheckoutQueryHandler,
+    filters,
+)
 
 import marketapp
 import state as state_store
+import stars
 import ton_payments
 import ton_web
 from data.proverb_loader import search_proverbs
@@ -35,6 +44,8 @@ SEND_BATCH = int(os.environ.get("MONITOR_SEND_BATCH", "25"))
 SEND_DELAY = float(os.environ.get("MONITOR_SEND_DELAY", "0.35"))
 MAX_OUTBOX = int(os.environ.get("MONITOR_MAX_OUTBOX", "500"))
 MAX_SEND_ATTEMPTS = int(os.environ.get("MONITOR_SEND_ATTEMPTS", "5"))
+STAR_AMOUNTS = stars.amounts()
+STAR_BUTTONS_PER_ROW = 2
 
 number_monitor = MarketMonitor(interval=MONITOR_INTERVAL, lookback=HISTORY_LOOKBACK)
 ton_monitor = ton_payments.TonDonationMonitor()
@@ -168,7 +179,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/monitor_off — отписать этот чат от уведомлений\n"
         "/donate — реквизиты для поддержки бота в Gram\n"
         "/mydonations — проверить свои подтверждённые донаты\n"
-        "/donations_status — состояние проверки донатов\n\n"
+        "/donations_status — состояние проверки донатов\n"
+        "/stars — поддержать бота звёздами Telegram\n"
+        "/terms — условия оплаты\n"
+        "/paysupport — поддержка по платежам\n"
+        "/stars_status — состояние платежей в звёздах\n\n"
         "Монитор работает постоянно и сам поднимается после каждого деплоя.\n"
         "Уведомления приходят во все чаты, где включён /monitor, а также в чаты из "
         "переменной окружения MONITOR_CHAT_ID.\n\n"
@@ -280,6 +295,7 @@ async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id
     pay_url = ton_web.public_pay_url(chat_id)
     text = ton_payments.format_donate(chat_id, one_tap=bool(pay_url))
+    text += "\n\nМожно поддержать и звёздами Telegram — /stars."
 
     if not pay_url:
         await update.message.reply_text(text, parse_mode="HTML")
@@ -313,6 +329,155 @@ async def donations_status_command(update: Update, context: ContextTypes.DEFAULT
     text = ton_monitor.status_text()
     text += f"\n🗂 файл состояния: <code>{state_store.donations_state_file()}</code>"
     await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def star_balance(context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    try:
+        amount = await context.bot.get_my_star_balance()
+    except Exception as exc:
+        print(f"Stars balance request failed: {exc!r}", flush=True)
+        return None
+    return getattr(amount, "amount", None)
+
+
+async def stars_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /stars handler received an update", flush=True)
+    if not update.effective_chat or not update.message:
+        return
+
+    chat_id = update.effective_chat.id
+    balance = await star_balance(context)
+    rows = [
+        [
+            InlineKeyboardButton(f"⭐ {amount}", callback_data=f"stars:{amount}")
+            for amount in STAR_AMOUNTS[start:start + STAR_BUTTONS_PER_ROW]
+        ]
+        for start in range(0, len(STAR_AMOUNTS), STAR_BUTTONS_PER_ROW)
+    ]
+    await update.message.reply_text(
+        stars.format_offer(chat_id, STAR_AMOUNTS, balance),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def stars_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    print(f"Telegram callback received: {query.data if query else None}", flush=True)
+    if query is None or query.message is None or not query.data:
+        return
+
+    await query.answer()
+
+    if not query.data.startswith("stars:"):
+        return
+    try:
+        amount = int(query.data.split(":", 1)[1])
+    except ValueError:
+        return
+    if amount not in STAR_AMOUNTS:
+        await query.message.reply_text("Не знаю такую сумму. Посмотри /stars.")
+        return
+
+    chat_id = query.message.chat_id
+    try:
+        await context.bot.send_invoice(
+            chat_id=chat_id,
+            title=stars.invoice_title(amount),
+            description=stars.invoice_description(),
+            payload=stars.payload_for(chat_id, amount),
+            provider_token="",
+            currency=stars.CURRENCY,
+            prices=[LabeledPrice(label=stars.price_label(amount), amount=amount)],
+            start_parameter=stars.START_PARAMETER,
+        )
+    except Exception as exc:
+        print(f"Stars send_invoice failed: {exc!r}", flush=True)
+        await query.message.reply_text(f"Не смог выставить счёт: {exc}")
+
+
+async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.pre_checkout_query
+    print("Telegram pre_checkout_query received", flush=True)
+    if query is None:
+        return
+
+    error = stars.check_invoice(query.invoice_payload, query.currency, query.total_amount)
+    if error is None:
+        await query.answer(ok=True)
+        return
+
+    print(
+        f"Stars pre_checkout rejected ({error}): payload={query.invoice_payload!r} "
+        f"amount={query.total_amount} currency={query.currency!r}",
+        flush=True,
+    )
+    await query.answer(
+        ok=False,
+        error_message="Не удалось проверить платёж. Попробуй ещё раз или напиши /paysupport.",
+    )
+
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    payment = message.successful_payment if message else None
+    print("Telegram successful_payment received", flush=True)
+    if message is None or payment is None:
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    user_id = update.effective_user.id if update.effective_user else None
+    stars.record_payment(payment, chat_id, user_id)
+
+    if payment.currency != stars.CURRENCY:
+        print(f"Stars payment with unexpected currency: {payment.currency!r}", flush=True)
+        return
+
+    await message.reply_text(stars.format_thanks(payment), parse_mode="HTML")
+
+
+async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /terms handler received an update", flush=True)
+    if not update.message:
+        return
+    await update.message.reply_text(stars.format_terms(), parse_mode="HTML")
+
+
+async def paysupport_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /paysupport handler received an update", flush=True)
+    if not update.message:
+        return
+    await update.message.reply_text(stars.format_support(), parse_mode="HTML")
+
+
+async def stars_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Telegram /stars_status handler received an update", flush=True)
+    if not update.message:
+        return
+
+    records = stars.saved_records()
+    total = sum(int(item.get("amount") or 0) for item in records if isinstance(item, dict))
+    last = records[-1] if records else None
+    lines = [
+        "⭐ <b>Статус платежей в звёздах</b>\n",
+        f"🧾 записей: <b>{len(records)}</b>",
+        f"💰 всего звёзд: <b>{total}</b>",
+        f"🎛 суммы в кнопках: <code>{', '.join(str(value) for value in STAR_AMOUNTS)}</code>",
+        f"🌐 валюта: <b>{stars.CURRENCY}</b>",
+        "⏱ окно pre_checkout: <b>10 сек</b> (требование Telegram)",
+    ]
+    balance = await star_balance(context)
+    if balance is not None:
+        lines.append(f"⭐ баланс бота: <b>{balance}</b>")
+    if last:
+        lines.append(
+            f"🕒 последний: <b>{last.get('amount')}</b> звёзд, charge_id "
+            f"<code>{html.escape(str(last.get('telegram_payment_charge_id'))[:40])}</code>"
+        )
+    lines.append(f"🗂 файл состояния: <code>{state_store.stars_state_file()}</code>")
+    lines.append("")
+    lines.append("Charge id нужен для возврата через refundStarPayment.")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -388,6 +553,13 @@ def create_app() -> web.Application:
     telegram_app.add_handler(CommandHandler("donate", donate_command))
     telegram_app.add_handler(CommandHandler("mydonations", mydonations_command))
     telegram_app.add_handler(CommandHandler("donations_status", donations_status_command))
+    telegram_app.add_handler(CommandHandler("stars", stars_command))
+    telegram_app.add_handler(CommandHandler("terms", terms_command))
+    telegram_app.add_handler(CommandHandler("paysupport", paysupport_command))
+    telegram_app.add_handler(CommandHandler("stars_status", stars_status_command))
+    telegram_app.add_handler(CallbackQueryHandler(stars_callback, pattern=r"^stars:"))
+    telegram_app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
+    telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(error_handler)
 
