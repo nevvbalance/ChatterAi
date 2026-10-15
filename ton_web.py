@@ -70,6 +70,23 @@ def pay_url(chat_id: int, base_url: str) -> str:
     return f"{base_url.rstrip('/')}{PAY_PATH}?chat={chat_id}"
 
 
+def base_url(request_origin: str, forwarded_proto: str | None = None) -> str:
+    """Public HTTPS base URL.
+
+    Render terminates TLS at its proxy, so the request itself arrives over plain
+    HTTP and request.url.origin() would produce the wrong scheme. Prefer the
+    configured external URL and otherwise trust X-Forwarded-Proto.
+    """
+    configured = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+
+    origin = (request_origin or "").strip().rstrip("/")
+    if forwarded_proto == "https" and origin.startswith("http://"):
+        origin = "https://" + origin[len("http://") :]
+    return origin
+
+
 def public_pay_url(chat_id: int) -> str:
     """Absolute payment-page URL for the bot button, empty when no public URL is configured."""
     base_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()

@@ -465,7 +465,8 @@ def create_app() -> web.Application:
             return web.Response(status=503, text="Donations are not configured")
 
         try:
-            page = ton_web.render_page(chat_id, str(request.url.origin()))
+            base = ton_web.base_url(str(request.url.origin()), request.headers.get("X-Forwarded-Proto"))
+            page = ton_web.render_page(chat_id, base)
         except Exception as exc:
             print(f"TON pay page error: {exc!r}", flush=True)
             return web.Response(status=500, text="Cannot render the payment page")
@@ -473,9 +474,10 @@ def create_app() -> web.Application:
         return web.Response(text=page, content_type="text/html", charset="utf-8")
 
     async def tonconnect_manifest(request: web.Request) -> web.Response:
-        print("TON Connect manifest requested", flush=True)
+        base = ton_web.base_url(str(request.url.origin()), request.headers.get("X-Forwarded-Proto"))
+        print(f"TON Connect manifest requested, base={base}", flush=True)
         return web.json_response(
-            ton_web.manifest(str(request.url.origin())),
+            ton_web.manifest(base),
             headers={"Access-Control-Allow-Origin": "*"},
         )
 
