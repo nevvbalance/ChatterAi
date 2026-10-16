@@ -504,23 +504,29 @@ async def stars_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
 PACK_CACHE: dict[str, list[dict[str, Any]]] = {}
 
 
-async def load_pack(bot: Any, name: str) -> list[dict[str, Any]]:
-    """Read a sticker or custom-emoji pack, cached in memory for this process."""
-    if name in PACK_CACHE:
-        return PACK_CACHE[name]
+async def load_pack(bot: Any, name: str, mode: str) -> list[dict[str, Any]]:
+    """Read a sticker or custom-emoji pack, filtered by mode and cached for this process."""
+    key = picker.cache_key(name, mode)
+    if key in PACK_CACHE:
+        return PACK_CACHE[key]
     sticker_set = await bot.get_sticker_set(name)
-    items = [picker.normalize(sticker) for sticker in sticker_set.stickers]
-    PACK_CACHE[name] = items
-    print(f"Pick: loaded pack {name!r} ({sticker_set.title}) with {len(items)} item(s)", flush=True)
+    all_items = [picker.normalize(sticker) for sticker in sticker_set.stickers]
+    items = picker.filter_items(all_items, mode)
+    PACK_CACHE[key] = items
+    print(
+        f"Pick: loaded pack {name!r} ({sticker_set.title}) mode={mode} "
+        f"with {len(items)} of {len(all_items)} item(s)",
+        flush=True,
+    )
     return items
 
 
-async def send_candidate(bot: Any, chat_id: int, pack: str, items: list[dict[str, Any]], index: int) -> None:
+async def send_candidate(bot: Any, chat_id: int, pack: str, items: list[dict[str, Any]], index: int, mode: str) -> None:
     if not items:
         return
     index %= len(items)
     item = items[index]
-    markup = picker.keyboard(pack, index, len(items))
+    markup = picker.keyboard(pack, index, len(items), mode)
     if item["kind"] == "custom_emoji":
         text, entities = picker.emoji_message(item, index + 1, len(items))
         await bot.send_message(chat_id=chat_id, text=text, entities=entities, reply_markup=markup)
@@ -536,15 +542,17 @@ async def pack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     args = context.args or []
     if not args:
         await update.message.reply_text(
-            "Укажи имя набора: /pack имя\n\n"
-            "Имя берётся из ссылки на набор: t.me/addstickers/имя или t.me/addemoji/имя."
+            "Укажи имя набора: /pack имя [анимированные]\n\n"
+            "Имя берётся из ссылки на набор: t.me/addstickers/имя или t.me/addemoji/имя.\n"
+            "Добавь второе слово «анимированные» — и статичные элементы будут пропущены."
         )
         return
 
     name = args[0].strip().lstrip("@")
+    mode = picker.parse_mode(args[1] if len(args) > 1 else "")
     try:
         sticker_set = await context.bot.get_sticker_set(name)
-        items = [picker.normalize(sticker) for sticker in sticker_set.stickers]
+        all_items = [picker.normalize(sticker) for sticker in sticker_set.stickers]
     except Exception as exc:
         print(f"Pick: cannot load pack {name!r}: {exc!r}", flush=True)
         await update.message.reply_text(
@@ -552,13 +560,15 @@ async def pack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    if not items:
-        await update.message.reply_text("В этом наборе нет элементов.")
+    shown = picker.filter_items(all_items, mode)
+    if not shown:
+        hint = " Анимированных в нём нет — попробуй без слова «анимированные»." if mode == picker.MODE_ANIMATED else ""
+        await update.message.reply_text(f"Показывать нечего.{hint}")
         return
 
-    PACK_CACHE[name] = items
-    await update.message.reply_text(picker.summarize(sticker_set.title, name, items))
-    await send_candidate(context.bot, update.effective_chat.id, name, items, 0)
+    PACK_CACHE[picker.cache_key(name, mode)] = shown
+    await update.message.reply_text(picker.summarize(sticker_set.title, name, all_items, shown, mode))
+    await send_candidate(context.bot, update.effective_chat.id, name, shown, 0, mode)
 
 
 async def pack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -572,9 +582,9 @@ async def pack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer()
         return
 
-    pack, index, action = decoded
+    pack, index, action, mode = decoded
     try:
-        items = await load_pack(context.bot, pack)
+        items = await load_pack(context.bot, pack, mode)
     except Exception as exc:
         print(f"Pick: cannot reload pack {pack!r}: {exc!r}", flush=True)
         await query.answer("Не смог перечитать набор", show_alert=True)
@@ -600,7 +610,7 @@ async def pack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await query.answer()
-    await send_candidate(context.bot, query.message.chat_id, pack, items, index)
+    await send_candidate(context.bot, query.message.chat_id, pack, items, index, mode)
 
 
 async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
