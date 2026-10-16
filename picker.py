@@ -7,29 +7,42 @@ ACTION_SHOW = "show"
 ACTION_CHOOSE = "choose"
 DEFAULT_PLACEHOLDER = "🟣"
 CALLBACK_LIMIT = 64
+MODE_ALL = "all"
+MODE_ANIMATED = "anim"
+MODES = (MODE_ALL, MODE_ANIMATED)
+ANIMATED_WORDS = ("animated", "anim", "анимированные", "анимация")
 
 
-def encode(pack: str, index: int, action: str) -> str:
-    payload = f"{CALLBACK_PREFIX}:{action}:{pack}:{index}"
+def encode(pack: str, index: int, action: str, mode: str = MODE_ALL) -> str:
+    payload = f"{CALLBACK_PREFIX}:{action}:{mode}:{pack}:{index}"
     if len(payload.encode("utf-8")) > CALLBACK_LIMIT:
         raise ValueError("pack name is too long for callback data")
     return payload
 
 
-def decode(data: str) -> tuple[str, int, str] | None:
+def decode(data: str) -> tuple[str, int, str, str] | None:
     parts = (data or "").split(":")
-    if len(parts) != 4 or parts[0] != CALLBACK_PREFIX:
+    if len(parts) != 5 or parts[0] != CALLBACK_PREFIX:
         return None
-    action = parts[1]
-    if action not in (ACTION_SHOW, ACTION_CHOOSE):
+    action, mode, pack, raw_index = parts[1], parts[2], parts[3], parts[4]
+    if action not in (ACTION_SHOW, ACTION_CHOOSE) or mode not in MODES or not pack:
         return None
     try:
-        index = int(parts[3])
+        index = int(raw_index)
     except ValueError:
         return None
-    if not parts[2] or index < 0:
+    if index < 0:
         return None
-    return parts[2], index, action
+    return pack, index, action, mode
+
+
+def parse_mode(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    return MODE_ANIMATED if text in ANIMATED_WORDS else MODE_ALL
+
+
+def cache_key(pack: str, mode: str) -> str:
+    return f"{pack}|{mode}"
 
 
 def normalize(sticker: Any) -> dict[str, Any]:
@@ -44,37 +57,46 @@ def normalize(sticker: Any) -> dict[str, Any]:
     }
 
 
-def summarize(title: str, pack: str, items: list[dict[str, Any]]) -> str:
-    animated = sum(1 for item in items if item["is_animated"])
-    video = sum(1 for item in items if item["is_video"])
-    custom = sum(1 for item in items if item["kind"] == "custom_emoji")
+def filter_items(items: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
+    if mode == MODE_ANIMATED:
+        return [item for item in items if item["is_animated"] or item["is_video"]]
+    return list(items)
+
+
+def summarize(title: str, pack: str, all_items: list[dict[str, Any]], shown: list[dict[str, Any]], mode: str) -> str:
+    animated = sum(1 for item in all_items if item["is_animated"])
+    video = sum(1 for item in all_items if item["is_video"])
+    custom = sum(1 for item in all_items if item["kind"] == "custom_emoji")
+
     lines = [
         f"Набор: {title}",
         f"Имя: {pack}",
-        f"Всего элементов: {len(items)}",
+        f"Всего элементов: {len(all_items)}",
         f"Анимированных: {animated} · видео: {video} · кастомных эмодзи: {custom}",
-        "",
-        "Решай глазами: анимированный стикер сам проиграется, а у кастомных эмодзи "
-        "API анимацию не сообщает — её видно только в чате.",
-        "",
-        "Листай кнопками ниже. Когда найдёшь нужный — нажми «Этот», и я запишу его id.",
     ]
+    if mode == MODE_ANIMATED:
+        lines.append(f"Показываю только анимированные: {len(shown)} из {len(all_items)}")
+    lines.append("")
+    lines.append("Листай кнопками ниже. Когда найдёшь нужный — нажми «Этот», и я запишу его id.")
     return "\n".join(lines)
 
 
 def describe(item: dict[str, Any], position: int, total: int) -> str:
     kind = "кастомный эмодзи" if item["kind"] == "custom_emoji" else "стикер"
-    return f"№{position} из {total} · {kind}"
+    marker = "анимированный" if item["is_animated"] else ("видео" if item["is_video"] else "статичный")
+    return f"№{position} из {total} · {kind} · {marker}"
 
 
-def keyboard(pack: str, index: int, total: int) -> InlineKeyboardMarkup:
+def keyboard(pack: str, index: int, total: int, mode: str = MODE_ALL) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("⬅️ Назад", callback_data=encode(pack, (index - 1) % total, ACTION_SHOW)),
-                InlineKeyboardButton("➡️ Прислать ещё", callback_data=encode(pack, (index + 1) % total, ACTION_SHOW)),
+                InlineKeyboardButton("⬅️ Назад", callback_data=encode(pack, (index - 1) % total, ACTION_SHOW, mode)),
+                InlineKeyboardButton(
+                    "➡️ Прислать ещё", callback_data=encode(pack, (index + 1) % total, ACTION_SHOW, mode)
+                ),
             ],
-            [InlineKeyboardButton("✅ Этот", callback_data=encode(pack, index, ACTION_CHOOSE))],
+            [InlineKeyboardButton("✅ Этот", callback_data=encode(pack, index, ACTION_CHOOSE, mode))],
         ]
     )
 
